@@ -1,0 +1,64 @@
+\section{Code source complet}
+\label{sec:appendix-code}
+
+Cette annexe inclut, via \code{\textbackslash lstinputlisting}, le contenu
+\textbf{réel} des fichiers du dépôt \code{StreamKMpp} au moment de la
+rédaction de ce rapport (dossier frère \code{../StreamKMpp} sur la même
+machine). Aucun extrait n'est retapé ou reconstitué de mémoire.
+
+\subsection{Configuration du projet}
+\lstinputlisting[language={}, basicstyle=\ttfamily\scriptsize, caption={\code{build.sbt}}]{../StreamKMpp/build.sbt}
+
+\subsection{Couche \code{core} : structures de données et k-means}
+
+\lstinputlisting[language=Scala, caption={\code{streamkm/core/Point.scala}}]{../StreamKMpp/src/main/scala/streamkm/core/Point.scala}
+
+\lstinputlisting[language=Scala, caption={\code{streamkm/core/KMeans.scala}}]{../StreamKMpp/src/main/scala/streamkm/core/KMeans.scala}
+
+\subsection{Couche \code{coreset} : coreset tree et merge-and-reduce}
+
+\lstinputlisting[language=Scala, caption={\code{streamkm/coreset/CoresetTree.scala}}]{../StreamKMpp/src/main/scala/streamkm/coreset/CoresetTree.scala}
+
+\lstinputlisting[language=Scala, caption={\code{streamkm/coreset/BucketManager.scala}}]{../StreamKMpp/src/main/scala/streamkm/coreset/BucketManager.scala}
+
+\subsection{Couche \code{spark} : portage distribué}
+
+\lstinputlisting[language=Scala, caption={\code{streamkm/spark/StreamKMPlusPlus.scala}}]{../StreamKMpp/src/main/scala/streamkm/spark/StreamKMPlusPlus.scala}
+
+\lstinputlisting[language=Scala, caption={\code{streamkm/spark/CostEvaluator.scala}}]{../StreamKMpp/src/main/scala/streamkm/spark/CostEvaluator.scala}
+
+\subsection{Couche \code{experiments} : harnais de mesure de qualité}
+
+\lstinputlisting[language=Scala, caption={\code{streamkm/experiments/QualityMetrics.scala}}]{../StreamKMpp/src/main/scala/streamkm/experiments/QualityMetrics.scala}
+
+\subsection{Démonstrateur exécutable sur petites données}
+\label{sec:appendix-notebook}
+
+Conformément au barème, cette annexe doit permettre de \og vérifier que tout
+fonctionne\fg{} sur un petit jeu de données. En l'absence, à ce stade, d'un
+notebook Jupyter/Databricks dédié (étape section 9 du projet, non commencée) :
+\todo[inline]{TODO : remplacer ce pointeur par un vrai notebook \code{.ipynb}
+une fois l'étape section 9 réalisée, avec des cellules d'entrée/sortie commentées
+comme l'exige le barème}), le point d'entrée exécutable et déterministe le
+plus proche est \code{streamkm.demo.Main} : il rejoue l'algorithme
+StreamKM++ complet en un seul thread sur un mélange de gaussiennes
+synthétique généré à la volée (donc reproductible sans dépendance à un
+fichier de données externe), et affiche le coût obtenu, le nombre de points
+vus et l'écart aux vrais centres. Il se lance avec :
+\begin{lstlisting}[language=bash, basicstyle=\ttfamily\small]
+sbt run   # choisir streamkm.demo.Main si plusieurs mains sont proposes
+\end{lstlisting}
+
+\lstinputlisting[language=Scala, caption={\code{streamkm/demo/Main.scala} : démonstrateur section 1/section 2 sur données synthétiques}]{../StreamKMpp/src/main/scala/streamkm/demo/Main.scala}
+
+\subsection{Suite de tests}
+
+\lstinputlisting[language=Scala, caption={\code{TestData.scala} : générateur de données synthétiques à vérité terrain}]{../StreamKMpp/src/test/scala/streamkm/TestData.scala}
+
+\lstinputlisting[language=Scala, caption={\code{core/KMeansSpec.scala}}]{../StreamKMpp/src/test/scala/streamkm/core/KMeansSpec.scala}
+
+\lstinputlisting[language=Scala, caption={\code{coreset/CoresetSpec.scala}}]{../StreamKMpp/src/test/scala/streamkm/coreset/CoresetSpec.scala}
+
+\lstinputlisting[language=Scala, caption={\code{spark/StreamKMSpec.scala}}]{../StreamKMpp/src/test/scala/streamkm/spark/StreamKMSpec.scala}
+
+\lstinputlisting[language=Scala, caption={\code{spark/CostEvaluatorSpec.scala}}]{../StreamKMpp/src/test/scala/streamkm/spark/CostEvaluatorSpec.scala}

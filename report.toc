@@ -1,0 +1,50 @@
+\babel@toc {french}{}\relax 
+\contentsline {section}{\numberline {1}Description de la solution adoptée}{3}{section.1}%
+\contentsline {subsection}{\numberline {1.1}Le problème : clustering k-means sur un flux de données}{3}{subsection.1.1}%
+\contentsline {subsection}{\numberline {1.2}Coreset et garantie d'approximation}{3}{subsection.1.2}%
+\contentsline {subsection}{\numberline {1.3}Construction du coreset : le \emph {coreset tree}}{3}{subsection.1.3}%
+\contentsline {paragraph}{Choix d'implémentation.}{3}{section*.2}%
+\contentsline {subsection}{\numberline {1.4}Traitement du flux : merge-and-reduce}{4}{subsection.1.4}%
+\contentsline {subsection}{\numberline {1.5}Ce qui change en passant de Flink à Spark}{4}{subsection.1.5}%
+\contentsline {section}{\numberline {2}Algorithmes conçus}{4}{section.2}%
+\contentsline {subsection}{\numberline {2.1}Seeding $D^2$ (k-means++) et algorithme de Lloyd}{4}{subsection.2.1}%
+\contentsline {subsection}{\numberline {2.2}Construction du coreset (coreset tree)}{5}{subsection.2.2}%
+\contentsline {subsection}{\numberline {2.3}Merge-and-reduce : consommation du flux}{5}{subsection.2.3}%
+\contentsline {subsection}{\numberline {2.4}Portage Spark : fusion en arbre plutôt que séquentielle}{5}{subsection.2.4}%
+\contentsline {section}{\numberline {3}Implémentation et commentaire du code}{6}{section.3}%
+\contentsline {subsection}{\numberline {3.1}Structure de données : le point pondéré}{6}{subsection.3.1}%
+\contentsline {subsection}{\numberline {3.2}Seeding $D^2$ pondéré}{6}{subsection.3.2}%
+\contentsline {paragraph}{Commentaire.}{8}{section*.3}%
+\contentsline {subsection}{\numberline {3.3}Lloyd pondéré et son invariant de monotonie}{8}{subsection.3.3}%
+\contentsline {paragraph}{Commentaire.}{9}{section*.4}%
+\contentsline {subsection}{\numberline {3.4}Coreset tree : la descente pondérée par le coût}{9}{subsection.3.4}%
+\contentsline {paragraph}{Commentaire.}{9}{section*.5}%
+\contentsline {subsection}{\numberline {3.5}Merge-and-reduce : consommation du flux par cascade de buckets}{10}{subsection.3.5}%
+\contentsline {paragraph}{Commentaire.}{10}{section*.6}%
+\contentsline {subsection}{\numberline {3.6}Fusion de deux \texttt {BucketManager} : le \texttt {combOp} du portage Spark}{10}{subsection.3.6}%
+\contentsline {paragraph}{Commentaire.}{11}{section*.7}%
+\contentsline {subsection}{\numberline {3.7}Portage Spark : pourquoi \texttt {treeReduce} plutôt que \texttt {treeAggregate}}{11}{subsection.3.7}%
+\contentsline {paragraph}{Commentaire.}{11}{section*.8}%
+\contentsline {subsection}{\numberline {3.8}Instrument de mesure : \texttt {CostEvaluator}}{11}{subsection.3.8}%
+\contentsline {paragraph}{Commentaire.}{12}{section*.9}%
+\contentsline {subsection}{\numberline {3.9}Validation : suite de tests}{12}{subsection.3.9}%
+\contentsline {section}{\numberline {4}Analyse expérimentale}{12}{section.4}%
+\contentsline {subsection}{\numberline {4.1}Jeu de données}{12}{subsection.4.1}%
+\contentsline {subsection}{\numberline {4.2}Instrument de mesure : \texttt {QualityMetrics}}{12}{subsection.4.2}%
+\contentsline {subsection}{\numberline {4.3}Expérience 1 : non-régression et comparaison à MLlib, à $k$ variable}{13}{subsection.4.3}%
+\contentsline {paragraph}{Discussion.}{13}{section*.12}%
+\contentsline {paragraph}{Tolérance dérivée (et non choisie arbitrairement).}{14}{section*.13}%
+\contentsline {subsection}{\numberline {4.4}Expérience 2 : trade-off qualité vs. taille du coreset $m$}{14}{subsection.4.4}%
+\contentsline {subsection}{\numberline {4.5}Scalabilité (temps d'exécution) : résultats à intégrer}{15}{subsection.4.5}%
+\contentsline {section}{\numberline {5}Discussion : points forts et points faibles}{15}{section.5}%
+\contentsline {subsection}{\numberline {5.1}Points forts}{15}{subsection.5.1}%
+\contentsline {subsection}{\numberline {5.2}Points faibles et limitations assumées}{15}{subsection.5.2}%
+\contentsline {section}{\numberline {6}Conclusion}{16}{section.6}%
+\contentsline {section}{\numberline {A}Code source complet}{17}{appendix.A}%
+\contentsline {subsection}{\numberline {A.1}Configuration du projet}{17}{subsection.A.1}%
+\contentsline {subsection}{\numberline {A.2}Couche \texttt {core} : structures de données et k-means}{18}{subsection.A.2}%
+\contentsline {subsection}{\numberline {A.3}Couche \texttt {coreset} : coreset tree et merge-and-reduce}{23}{subsection.A.3}%
+\contentsline {subsection}{\numberline {A.4}Couche \texttt {spark} : portage distribué}{30}{subsection.A.4}%
+\contentsline {subsection}{\numberline {A.5}Couche \texttt {experiments} : harnais de mesure de qualité}{34}{subsection.A.5}%
+\contentsline {subsection}{\numberline {A.6}Démonstrateur exécutable sur petites données}{39}{subsection.A.6}%
+\contentsline {subsection}{\numberline {A.7}Suite de tests}{41}{subsection.A.7}%

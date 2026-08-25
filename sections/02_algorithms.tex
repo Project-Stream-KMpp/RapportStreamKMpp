@@ -1,0 +1,146 @@
+\section{Algorithmes conçus}
+\label{sec:algorithms}
+
+Cette section présente, sous forme de pseudocode, les algorithmes tels
+qu'ils sont réellement implémentés dans ce dépôt (\code{streamkm.core},
+\code{streamkm.coreset}, \code{streamkm.spark}). Le code Scala correspondant,
+avec ses commentaires, est présenté et discuté en
+section~\ref{sec:implementation}.
+
+\subsection{Seeding $D^2$ (k-means++) et algorithme de Lloyd}
+
+Le seeding $D^2$ choisit les $k$ centres initiaux avec une probabilité
+proportionnelle à la distance au carré au centre déjà choisi le plus proche,
+garantissant une compétitivité $O(\log k)$ par rapport à l'optimum
+\cite{arthur2007}. Notre implémentation (\code{KMeans.seedPlusPlus},
+Algorithme~\ref{alg:seedpp}) en est une version \textbf{pondérée} : le
+premier centre est tiré proportionnellement au poids des points plutôt
+qu'uniformément (voir la discussion en section~\ref{sec:implementation}).
+
+\begin{algorithm}[h]
+\caption{\code{seedPlusPlus} : seeding $D^2$ pondéré}
+\label{alg:seedpp}
+\begin{algorithmic}[1]
+\REQUIRE Points pondérés $\{(x_i, w_i)\}_{i=1}^n$, nombre de centres $k$
+\ENSURE Centres initiaux $c_1,\dots,c_k$
+\STATE $c_1 \leftarrow$ tirage parmi $x_i$ avec probabilité $\propto w_i$
+\STATE $\mathrm{closest}[i] \leftarrow \lVert x_i - c_1\rVert^2$ pour tout $i$
+\FOR{$f = 2$ à $k$}
+  \STATE $c_f \leftarrow$ tirage parmi $x_i$ avec probabilité $\propto w_i \cdot \mathrm{closest}[i]$
+  \FOR{tout $i$}
+    \STATE $\mathrm{closest}[i] \leftarrow \min(\mathrm{closest}[i], \lVert x_i - c_f\rVert^2)$ \COMMENT{mise à jour incrémentale, évite $O(nk^2)$}
+  \ENDFOR
+\ENDFOR
+\RETURN $(c_1,\dots,c_k)$
+\end{algorithmic}
+\end{algorithm}
+
+L'algorithme de Lloyd affine ensuite ces centres par itérations
+affectation/mise-à-jour jusqu'à convergence du coût. Notre implémentation
+(\code{KMeans.lloyd}, Algorithme~\ref{alg:lloyd}) est également pondérée : le
+centre d'un cluster est la \textbf{moyenne pondérée} de ses points affectés,
+et non leur moyenne simple. Omettre les poids ici est le bug le plus
+classique de ce pipeline, puisque le code continue de tourner sans erreur
+mais produit des centres silencieusement faux dès qu'il est appliqué à un
+coreset (poids hétérogènes).
+
+\begin{algorithm}[h]
+\caption{\code{lloyd} : algorithme de Lloyd pondéré}
+\label{alg:lloyd}
+\begin{algorithmic}[1]
+\REQUIRE Points pondérés, centres initiaux $c_1,\dots,c_k$, tolérance $\tau$
+\ENSURE Centres $c_1,\dots,c_k$, coût final
+\STATE $\mathrm{prevCost} \leftarrow +\infty$
+\REPEAT
+  \STATE Affecter chaque point $x_i$ au centre le plus proche ; accumuler $\mathrm{currCost} \leftarrow \sum_i w_i \cdot \min_j \lVert x_i - c_j \rVert^2$
+  \STATE Recalculer chaque centre $c_j$ comme la moyenne pondérée des points qui lui sont affectés
+  \STATE \textbf{assert} $\mathrm{currCost} \le \mathrm{prevCost}$ \COMMENT{invariant de Lloyd, vérifié en mode debug}
+  \IF{$\mathrm{prevCost} - \mathrm{currCost} \le \tau \cdot \mathrm{prevCost}$}
+    \STATE \textbf{arrêter}
+  \ENDIF
+  \STATE $\mathrm{prevCost} \leftarrow \mathrm{currCost}$
+\UNTIL{arrêt ou nombre maximal d'itérations atteint}
+\RETURN centres, $\mathrm{currCost}$
+\end{algorithmic}
+\end{algorithm}
+
+\code{KMeans.fit} exécute \code{nRestarts} exécutions indépendantes de
+seeding + Lloyd et conserve le résultat de coût minimal, 5 par défaut,
+conformément à la thèse (\cite{bitsakis2018}, section 2.3.4).
+
+\subsection{Construction du coreset (coreset tree)}
+
+\begin{algorithm}[h]
+\caption{\code{CoresetTree.build} : construction du coreset par arbre binaire divisif}
+\label{alg:coresettree}
+\begin{algorithmic}[1]
+\REQUIRE Points pondérés $P$, taille cible $m$
+\ENSURE Coreset $S$ de taille $\le m$
+\IF{$|P| \le m$}
+  \RETURN $P$ \COMMENT{déjà son propre coreset}
+\ENDIF
+\STATE Racine $\leftarrow$ nœud contenant $P$, représentant tiré $\propto$ poids
+\STATE $\mathrm{leaves} \leftarrow 1$
+\WHILE{$\mathrm{leaves} < m$ et $\mathrm{cost}(\mathrm{racine}) > 0$}
+  \STATE Descendre depuis la racine ; à chaque nœud interne, choisir un enfant avec probabilité $\propto$ son \textbf{coût}
+  \STATE Dans la feuille atteinte, tirer un nouveau représentant $q$ avec probabilité $\propto D^2(\cdot, \mathrm{repr\_actuel})$
+  \STATE Scinder la feuille en deux (proximité à l'ancien représentant vs. $q$)
+  \STATE Recalculer coût et masse des deux nouveaux nœuds, propager la mise à jour jusqu'à la racine
+  \STATE $\mathrm{leaves} \leftarrow \mathrm{leaves} + 1$
+\ENDWHILE
+\RETURN union des représentants des feuilles, pondérés par la masse de leur sous-arbre
+\end{algorithmic}
+\end{algorithm}
+
+\subsection{Merge-and-reduce : consommation du flux}
+
+\begin{algorithm}[h]
+\caption{\code{BucketManager.insert} : insertion d'un point (merge-and-reduce)}
+\label{alg:insert}
+\begin{algorithmic}[1]
+\REQUIRE Point $p$, taille de coreset $m$
+\STATE $B_0 \leftarrow B_0 \cup \{p\}$
+\IF{$|B_0| \ge m$}
+  \IF{$B_1$ vide}
+    \STATE $B_1 \leftarrow B_0$ ; $B_0 \leftarrow \emptyset$ \COMMENT{déplacement simple, pas de réduction}
+  \ELSE
+    \STATE $\mathrm{union} \leftarrow B_0 \cup B_1$ ; $B_0, B_1 \leftarrow \emptyset$ ; $\mathrm{level} \leftarrow 2$
+    \WHILE{niveau $\mathrm{level}$ non trouvé libre}
+      \STATE $\mathrm{reduced} \leftarrow \mathtt{CoresetTree.build}(\mathrm{union}, m)$
+      \IF{$B_{\mathrm{level}}$ vide}
+        \STATE $B_{\mathrm{level}} \leftarrow \mathrm{reduced}$ \COMMENT{niveau trouvé}
+      \ELSE
+        \STATE $\mathrm{union} \leftarrow \mathrm{reduced} \cup B_{\mathrm{level}}$ ; $B_{\mathrm{level}} \leftarrow \emptyset$ ; $\mathrm{level} \leftarrow \mathrm{level}+1$
+      \ENDIF
+    \ENDWHILE
+  \ENDIF
+\ENDIF
+\end{algorithmic}
+\end{algorithm}
+
+\subsection{Portage Spark : fusion en arbre plutôt que séquentielle}
+
+L'algorithme~\ref{alg:mergecoresets} est notre contribution principale par
+rapport au dataflow Flink de la thèse : la fusion des coresets partiels de
+toutes les partitions, qui y est un opérateur non-parallèle
+(\code{FlatMapToFinalCoreset}, un seul thread), devient ici une réduction en
+arbre distribuée.
+
+\begin{algorithm}[h]
+\caption{\code{StreamKMPlusPlus.mergeCoresets} : fusion distribuée en arbre}
+\label{alg:mergecoresets}
+\begin{algorithmic}[1]
+\REQUIRE RDD de points $\mathrm{rdd}$, paramètres $(k,m,\mathrm{seed})$, profondeur $\mathrm{depth}$
+\ENSURE Coreset final de taille $\le m$ représentant tout le RDD
+\STATE Pour chaque partition d'indice $i$ : construire $\mathrm{bm}_i \leftarrow$ \texttt{BucketManager}$(m, \mathrm{seed}+i)$ et y insérer tous les points de la partition (Algorithme~\ref{alg:insert})
+\STATE Fusionner les $\mathrm{bm}_i$ deux à deux en arbre, de profondeur $\mathrm{depth}$, via $\mathrm{bm}_a.\mathtt{merge}(\mathrm{bm}_b)$
+\RETURN $\mathtt{extractCoreset}()$ du résultat de la fusion finale
+\end{algorithmic}
+\end{algorithm}
+
+La graine dérivée de l'indice de partition (ligne 1) garantit un aléa
+indépendant \emph{par partition}, une condition nécessaire pour que les
+expériences de scalabilité (section~\ref{sec:experiments}) isolent l'effet
+du partitionnement d'un simple effet de graine partagée (voir
+section~\ref{sec:implementation} pour la discussion détaillée de ce choix
+face à \code{RDD.treeAggregate}).

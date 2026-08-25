@@ -1,0 +1,141 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage{fontspec}
+\setmainfont{Latin Modern Roman}
+\setmonofont{Latin Modern Mono}[Scale=0.9]
+\usepackage[french]{babel}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{algorithm}
+\usepackage{algorithmic}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{geometry}
+\usepackage{pgfplots}
+\pgfplotsset{compat=1.18}
+\usepackage{caption}
+\usepackage{enumitem}
+\usepackage{todonotes}
+
+\geometry{margin=2.5cm}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=blue!50!black,
+  citecolor=blue!50!black,
+  urlcolor=blue!50!black
+}
+
+\definecolor{codebg}{rgb}{0.97,0.97,0.97}
+\definecolor{codekeyword}{rgb}{0.0,0.0,0.6}
+\definecolor{codecomment}{rgb}{0.25,0.5,0.25}
+\definecolor{codestring}{rgb}{0.6,0.1,0.1}
+
+\lstdefinelanguage{Scala}{
+  morekeywords={abstract,case,catch,class,def,do,else,extends,false,final,
+    finally,for,forSome,if,implicit,import,lazy,match,new,null,object,
+    override,package,private,protected,return,sealed,super,this,throw,
+    trait,try,true,type,val,var,while,with,yield},
+  sensitive=true,
+  morecomment=[l]{//},
+  morecomment=[s]{/*}{*/},
+  morestring=[b]",
+  morestring=[b]'
+}
+
+\lstset{
+  language=Scala,
+  backgroundcolor=\color{codebg},
+  basicstyle=\ttfamily\footnotesize,
+  keywordstyle=\color{codekeyword}\bfseries,
+  commentstyle=\color{codecomment}\itshape,
+  stringstyle=\color{codestring},
+  numbers=left,
+  numberstyle=\tiny\color{gray},
+  stepnumber=1,
+  numbersep=8pt,
+  frame=single,
+  rulecolor=\color{black!30},
+  breaklines=true,
+  breakatwhitespace=false,
+  showstringspaces=false,
+  tabsize=2,
+  captionpos=b
+}
+
+\newcommand{\code}[1]{\texttt{#1}}
+\newcommand{\pkg}[1]{\texttt{#1}}
+
+\title{\textbf{StreamKM++ sur Apache Spark}\\
+\large Portage d'un algorithme de clustering de flux depuis Apache Flink}
+\author{Projet M2 Dauphine, Déploiement ML à grande échelle}
+\date{Août 2026}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+Ce rapport documente le portage en \textbf{Apache Spark} de l'algorithme
+\textbf{StreamKM++} \cite{ackermann2012}, un algorithme de clustering en flux
+basé sur les coresets, dont une implémentation de référence en Apache Flink
+est étudiée dans le mémoire de Bitsakis \cite{bitsakis2018}. Nous décrivons
+la solution adoptée (coreset tree et merge-and-reduce, section~\ref{sec:solution}),
+les algorithmes conçus (section~\ref{sec:algorithms}) et leur implémentation
+commentée (section~\ref{sec:implementation}), l'évaluation expérimentale de
+la qualité du clustering (section~\ref{sec:experiments}), une discussion
+critique des points forts et faibles de l'approche
+(section~\ref{sec:discussion}), et fournissons en annexe l'intégralité du
+code source ainsi qu'un point d'entrée exécutable sur un petit jeu de
+données synthétiques (section~\ref{sec:appendix-code}).
+\end{abstract}
+
+\tableofcontents
+\newpage
+
+\input{sections/01_solution}
+\input{sections/02_algorithms}
+\input{sections/03_implementation}
+\input{sections/04_experiments}
+\input{sections/05_discussion}
+\input{sections/06_conclusion}
+
+\appendix
+\input{appendix/appendix_code}
+
+\begin{thebibliography}{9}
+
+\bibitem{ackermann2012}
+M.~R. Ackermann, M.~Märtens, C.~Raupach, K.~Swierkot, C.~Lammersen, and
+C.~Sohler.
+\newblock StreamKM++: A clustering algorithm for data streams.
+\newblock \emph{Journal of Experimental Algorithmics}, 17:2.4, 2012.
+
+\bibitem{bitsakis2018}
+T.~Bitsakis.
+\newblock \emph{Clustering Big Data Streams in Apache Flink}.
+\newblock Diploma Thesis, Technical University of Crete, School of
+Electrical \& Computer Engineering, October 2018.
+
+\bibitem{arthur2007}
+D.~Arthur and S.~Vassilvitskii.
+\newblock k-means++: the advantages of careful seeding.
+\newblock In \emph{Proceedings of the 18th Annual ACM-SIAM Symposium on
+Discrete Algorithms (SODA'07)}, pages 1027--1035, 2007.
+
+\bibitem{lloyd1982}
+S.~P. Lloyd.
+\newblock Least squares quantization in PCM.
+\newblock \emph{IEEE Transactions on Information Theory}, 28(2):129--137,
+1982.
+
+\bibitem{spark-treereduce}
+Apache Spark documentation.
+\newblock \texttt{RDD.treeReduce} / \texttt{RDD.treeAggregate}.
+\newblock \url{https://spark.apache.org/docs/latest/api/scala/org/apache/spark/rdd/RDD.html}
+
+\end{thebibliography}
+
+\end{document}
