@@ -1,106 +1,317 @@
+```latex
 % !TeX root = main.tex
-% Structure de ce chapitre imposée par METHODO_StreamKMpp_Spark.md §5 :
-%   5.1 Setup --- 5.2 Qualité (E1, E2, E6) --- 5.3 Scalabilité (E3, E3bis, E4, E5, E7)
-% et par la règle d'ordre du §0 : qualité avant scalabilité, jamais l'inverse
-% (mesurer un speedup sur un algorithme dont le résultat serait faux ne veut
-% rien dire).
-%
-% La macro \aCompleter (marqueur "reste à faire", cherchable via "PLACEHOLDER")
-% est définie dans main.tex, avant le premier \input.
 
 \chapter{Évaluation expérimentale}
 \label{ch:evaluation}
 
-Conformément à notre méthodologie de travail (chapitre~\ref{ch:introduction}),
-la qualité du clustering est validée \emph{avant} sa scalabilité : mesurer un
-speedup sur un algorithme dont le résultat serait faux n'aurait aucun sens.
+Ce chapitre évalue l'implémentation de StreamKM++ réalisée dans le cadre du projet. L'évaluation suit trois étapes. La première consiste à vérifier la correction des principales briques algorithmiques indépendamment de Spark. La deuxième étudie la qualité du clustering obtenu sur un jeu de données réel, en comparant notamment les versions séquentielle et distribuée de StreamKM++ ainsi que l'implémentation K-Means de Spark MLlib. Enfin, la troisième partie porte sur la scalabilité de la solution lorsque le volume de données et le degré de parallélisme augmentent.
 
-\section{Protocole et environnement}
-\label{sec:eval-setup}
+Cet ordre permet de vérifier la validité des résultats avant d'étudier les performances de l'implémentation distribuée. Une amélioration du temps d'exécution n'aurait en effet que peu d'intérêt si elle s'accompagnait d'une dégradation importante de la qualité du clustering.
 
-\subsection{Optimisation du kernel local (JMH)}
-\label{sec:eval-jmh}
 
-Travail mené en parallèle sur les couches \texttt{core}/\texttt{coreset}
-uniquement (Structure of Arrays, tableaux primitifs, suppression du boxing
---- \texttt{streamkm.core.PointsSoA}), mesuré avec JMH plutôt que dans un job
-Spark : le JMH mesure une JVM isolée, il ne peut rien dire d'un job
-distribué. Les deux mesures (kernel local puis job Spark de bout en bout,
-§\ref{sec:eval-e6}--\ref{sec:eval-scalabilite}) répondent à deux questions
-différentes.
+\section{Protocole expérimental}
+\label{sec:eval-protocole}
 
-\paragraph{Hypothèse.} La représentation initiale (\emph{Array of
-Structures} : \texttt{Array[Point]}, chaque \texttt{Point} portant son
-propre \texttt{Array[Double]}) impose une double indirection à chaque accès
-aux coordonnées, exactement le \emph{pointer chasing} que la littérature
-sur la disposition mémoire identifie comme coûteux en cache. L'hypothèse de
-départ était qu'une représentation \emph{Structure of Arrays} hors-tas
-(\texttt{PointsSoA} : un unique \texttt{java.nio.DoubleBuffer} adossé à
-\texttt{ByteBuffer.allocateDirect}, coordonnées contiguës en
-\emph{row-major}) réduirait ce coût sur les boucles les plus critiqus du
-pipeline (\texttt{Distance.sqdist}, appelée à chaque affectation de point
-dans \texttt{lloyd} et à chaque descente dans \texttt{CoresetTree}).
+Les expériences de qualité sont réalisées sur le jeu de données Covertype. Ce jeu contient 581\,012 observations décrites par 54 attributs numériques utilisés pour le clustering. La variable correspondant à la classe associée à chaque observation n'est pas utilisée par StreamKM++, l'algorithme étant non supervisé.
 
-\paragraph{Protocole.} JMH~1.37, 5~itérations de warmup, 30~itérations de
-mesure, 1~fork, modes \texttt{Throughput} et \texttt{AverageTime}, JDK
-identique pour les deux versions comparées (condition nécessaire à la
-validité de la comparaison). Six benchmarks isolent chacun une brique du
-pipeline : \texttt{sqdist} et \texttt{nearest} (calcul pur, sans allocation
-ni GC), \texttt{CoresetTree.build} et \texttt{BucketManager.insertAll}
-(écriture/lecture de buffers, avec allocation d'objets \texttt{Node}),
-\texttt{KMeans.lloyd} et le pipeline complet \texttt{fullPipeline} (opérations
-composites, mêlant accès aux points et calcul indépendant de leur
-représentation).
+Une première phase d'expérimentation est menée sur un sous-ensemble constitué des 20\,000 premières observations. Cette étape permet de vérifier le fonctionnement du pipeline expérimental et la cohérence des résultats avant d'exécuter les expériences sur le jeu de données complet.
 
-\paragraph{Résultat --- l'hypothèse est infirmée.} Contrairement à
-l'attente, la version SoA hors-tas est \textbf{systématiquement plus lente}
-que l'AoS d'origine, sur les six benchmarks et les deux modes de mesure,
-sans exception :
+Pour les expériences distribuées, les données sont parallélisées sous forme de RDD et réparties entre huit partitions Spark. Chaque partition construit un résumé local des observations qui lui sont attribuées. Les coresets locaux obtenus sont ensuite fusionnés progressivement afin de construire un résumé global utilisé pour calculer les centres finaux.
 
-\begin{table}[h]
+La qualité du clustering est mesurée à partir de la somme des erreurs quadratiques, ou \emph{Sum of Squared Errors} (SSE). Pour un ensemble de points $X$ et un ensemble de centres $C$, le coût est défini par :
+
+\[
+\mathrm{SSE}(X,C)
+=
+\sum_{x \in X}
+\min_{c \in C}
+\|x-c\|^2.
+\]
+
+Dans toutes les expériences, ce coût est calculé sur les données originales et non sur le coreset. Le coreset intervient uniquement dans la détermination des centres. Cette distinction est importante : mesurer la SSE directement sur le résumé ne permettrait pas d'évaluer correctement la qualité du clustering obtenu sur l'ensemble initial.
+
+Trois approches sont considérées :
+
+\begin{itemize}
+    \item StreamKM++ séquentiel, utilisé comme référence interne ;
+    \item StreamKM++ distribué avec Apache Spark ;
+    \item K-Means de Spark MLlib, utilisé comme référence externe.
+\end{itemize}
+
+La comparaison avec MLlib ne cherche pas à établir une équivalence entre les deux méthodes. K-Means MLlib travaille directement sur les données distribuées, tandis que StreamKM++ construit d'abord un coreset de taille réduite. Cette comparaison permet surtout de vérifier que la réduction des données introduite par StreamKM++ ne conduit pas à une dégradation importante de la qualité du clustering.
+
+
+\section{Validation de l'implémentation}
+\label{sec:eval-validation}
+
+Avant les expériences sur Covertype, plusieurs tests élémentaires ont été réalisés afin de valider séparément les principales briques de l'implémentation. Cette étape vise notamment à détecter des erreurs qui pourraient produire des résultats numériquement plausibles tout en étant algorithmiquement incorrects.
+
+Les tests couvrent le calcul des distances, l'algorithme de Lloyd, la prise en compte des poids, la construction des coresets ainsi que la conservation de la masse lors des opérations de fusion.
+
+\begin{table}[ht]
 \centering
 \small
 \begin{tabular}{lll}
 \toprule
-Benchmark & Nature de l'opération & Écart SoA vs AoS (\texttt{avgt}) \\
+\textbf{Test} & \textbf{Résultat attendu} & \textbf{Résultat obtenu} \\
 \midrule
-\texttt{sqdist}              & calcul pur              & $+46$ à $+77\,\%$ \\
-\texttt{nearest}             & calcul pur               & $+45$ à $+51\,\%$ \\
-\texttt{insertAll}           & écriture de buffer      & $+32$ à $+50\,\%$ \\
-\texttt{CoresetTree.build}   & mixte (buffer + alloc.) & $+36$ à $+59\,\%$ \\
-\texttt{lloyd}                & mixte                    & $+20$ à $+30\,\%$ \\
-\texttt{fullPipeline}         & composite                & $+15$ à $+21\,\%$ \\
+Distance euclidienne au carré
+    & $25$
+    & $25$ \\
+
+K-Means déterministe
+    & SSE $=4$
+    & SSE $=4$ \\
+
+K-Means pondéré
+    & centre $(2.5,0)$, SSE $=75$
+    & conforme \\
+
+Construction du coreset
+    & masse conservée
+    & conforme \\
+
+BucketManager
+    & masse conservée
+    & conforme \\
+
+Lecture de Covertype
+    & $54$ dimensions
+    & conforme \\
 \bottomrule
 \end{tabular}
-\caption{Écart relatif de latence moyenne (\texttt{AverageTime}), SoA
-hors-tas vs AoS, sur les six benchmarks du kernel local.}
+\caption{Validation des principales briques algorithmiques.}
+\label{tab:validation-implementation}
+\end{table}
+
+Le premier test vérifie directement le calcul de la distance euclidienne au carré sur un exemple dont le résultat est connu. Le deuxième utilise un petit ensemble de points permettant de déterminer manuellement le résultat attendu de l'algorithme de Lloyd. Le test pondéré vérifie que les poids associés aux points sont correctement intégrés dans le calcul des nouveaux centres et du coût.
+
+Les tests consacrés au coreset et au \texttt{BucketManager} vérifient une propriété importante de l'implémentation : la somme des poids des points du résumé doit correspondre au nombre total d'observations représentées. Les opérations successives de réduction et de fusion ne doivent donc pas entraîner de perte de masse.
+
+Enfin, un test de lecture du jeu Covertype vérifie que chaque observation est correctement transformée en un vecteur de 54 dimensions après exclusion de la variable de classe.
+
+Ces tests ne constituent pas à eux seuls une évaluation de la qualité du clustering à grande échelle. Ils permettent cependant de valider indépendamment plusieurs propriétés nécessaires avant de passer à l'expérimentation sur des données réelles.
+
+
+\section{Qualité du clustering sur Covertype}
+\label{sec:eval-qualite}
+
+Une première série d'expériences étudie la qualité du clustering produit par StreamKM++. Deux paramètres sont considérés : le nombre de clusters $k$ et la taille maximale $m$ du coreset.
+
+Les premières mesures présentées dans cette section utilisent un sous-ensemble de 20\,000 observations de Covertype. Elles servent principalement à valider le protocole et à comparer le comportement des différentes implémentations dans des conditions identiques.
+
+
+\subsection{Influence du nombre de clusters}
+\label{sec:eval-k}
+
+La première expérience étudie l'évolution du coût lorsque le nombre de clusters augmente. Les valeurs suivantes sont considérées :
+
+\[
+k \in \{10,20,30,40,50\}.
+\]
+
+Pour chaque configuration, la taille du coreset est définie relativement au nombre de clusters selon :
+
+\[
+m = 200k.
+\]
+
+Le tableau~\ref{tab:quality-k} présente les coûts obtenus avec StreamKM++ séquentiel, StreamKM++ distribué avec Spark et K-Means de Spark MLlib.
+
+\begin{table}[ht]
+\centering
+\small
+\begin{tabular}{rrrr}
+\toprule
+\textbf{$k$}
+& \textbf{StreamKM++ séquentiel}
+& \textbf{StreamKM++ Spark}
+& \textbf{MLlib} \\
+\midrule
+10 & $10.029 \times 10^{9}$ & $10.073 \times 10^{9}$ & $10.019 \times 10^{9}$ \\
+20 & $5.792 \times 10^{9}$  & $5.789 \times 10^{9}$  & $5.724 \times 10^{9}$ \\
+30 & $4.293 \times 10^{9}$  & $4.335 \times 10^{9}$  & $4.289 \times 10^{9}$ \\
+40 & $3.535 \times 10^{9}$  & $3.531 \times 10^{9}$  & $3.508 \times 10^{9}$ \\
+50 & $3.028 \times 10^{9}$  & $3.028 \times 10^{9}$  & $3.043 \times 10^{9}$ \\
+\bottomrule
+\end{tabular}
+\caption{Influence du nombre de clusters sur la SSE pour 20\,000 observations de Covertype.}
+\label{tab:quality-k}
+\end{table}
+
+Le premier comportement observable est la diminution nette de la SSE lorsque $k$ augmente. Ce résultat est attendu : disposer d'un plus grand nombre de centres permet de représenter plus finement la distribution des observations et réduit donc la distance entre chaque point et son centre le plus proche.
+
+Les résultats obtenus par les versions séquentielle et distribuée de StreamKM++ sont également très proches. Sur les configurations étudiées, les différences restent faibles par rapport au niveau global du coût. Cela constitue une première indication que la construction locale des coresets sur les partitions Spark suivie de leur fusion ne dégrade pas fortement la qualité du clustering.
+
+Les valeurs obtenues avec MLlib restent elles aussi du même ordre de grandeur. Selon la valeur de $k$, MLlib peut produire un coût légèrement inférieur ou légèrement supérieur à celui de StreamKM++. Il n'apparaît donc pas, sur cette expérience, de dégradation systématique importante liée à l'utilisation du coreset.
+
+
+\subsection{Influence de la taille du coreset}
+\label{sec:eval-m}
+
+La deuxième expérience étudie l'influence du paramètre $m$, qui contrôle la taille maximale du coreset. Le nombre de clusters est fixé à :
+
+\[
+k=25,
+\]
+
+et quatre tailles de coreset sont étudiées :
+
+\[
+m \in \{1000,5000,10000,20000\}.
+\]
+
+Les résultats sont présentés dans le tableau~\ref{tab:quality-m}.
+
+\begin{table}[ht]
+\centering
+\small
+\begin{tabular}{rrr}
+\toprule
+\textbf{$m$}
+& \textbf{StreamKM++ séquentiel}
+& \textbf{StreamKM++ Spark} \\
+\midrule
+1\,000  & $5.061 \times 10^{9}$ & $5.071 \times 10^{9}$ \\
+5\,000  & $4.958 \times 10^{9}$ & $4.958 \times 10^{9}$ \\
+10\,000 & $4.847 \times 10^{9}$ & $4.847 \times 10^{9}$ \\
+20\,000 & $4.967 \times 10^{9}$ & $4.967 \times 10^{9}$ \\
+\bottomrule
+\end{tabular}
+\caption{Influence de la taille du coreset pour $k=25$ sur 20\,000 observations de Covertype.}
+\label{tab:quality-m}
+\end{table}
+
+Entre $m=1000$ et $m=10000$, l'augmentation de la taille du coreset s'accompagne d'une diminution du coût. Ce comportement est cohérent avec le rôle du coreset : un résumé plus grand peut conserver davantage d'information sur la distribution des données originales et fournir ainsi une approximation plus précise du problème de clustering.
+
+Cette tendance n'est toutefois pas strictement monotone. Pour $m=20000$, le coût observé augmente par rapport à $m=10000$. Cette observation ne permet pas de conclure qu'une augmentation de la taille du coreset dégrade la qualité. StreamKM++ ainsi que l'initialisation k-means++ comportent des étapes aléatoires, ce qui peut conduire à des centres différents entre deux exécutions.
+
+Une analyse plus rigoureuse de l'influence de $m$ nécessiterait donc plusieurs répétitions avec différentes graines aléatoires et la comparaison des distributions de coûts obtenues, par exemple au moyen de leur moyenne et de leur écart-type.
+
+
+\subsection{Comparaison avec Spark MLlib}
+\label{sec:eval-mllib}
+
+Spark MLlib est utilisé comme référence afin de situer les coûts obtenus par StreamKM++ par rapport à une implémentation de K-Means directement intégrée à Spark.
+
+Les deux approches ne suivent cependant pas exactement le même processus. MLlib effectue le clustering directement sur les données distribuées, tandis que StreamKM++ remplace progressivement les observations par un ensemble pondéré de taille limitée avant d'exécuter le clustering final.
+
+La comparaison porte donc essentiellement sur le coût final obtenu sur les données originales. Les résultats du tableau~\ref{tab:quality-k} montrent que les coûts obtenus par StreamKM++ et MLlib restent proches sur les configurations testées. L'utilisation d'un coreset permet ainsi de réduire le nombre de points manipulés lors de l'étape finale de clustering sans entraîner, sur ces premières expériences, une augmentation importante de la SSE.
+
+Cette observation doit néanmoins être complétée par les expériences sur le jeu Covertype complet et par les mesures de temps d'exécution. L'intérêt principal de StreamKM++ ne réside en effet pas uniquement dans la qualité du résultat, mais dans sa capacité à conserver un résumé de taille contrôlée lorsque le volume de données augmente.
+
+
+\section{Scalabilité de l'implémentation Spark}
+\label{sec:eval-scalabilite}
+
+Après avoir étudié la qualité des clusters obtenus, l'évaluation porte sur le comportement de l'implémentation distribuée lorsque la quantité de données et le degré de parallélisme augmentent.
+
+Deux dimensions sont considérées. La première consiste à faire varier le nombre d'observations traitées, par exemple avec les volumes suivants :
+
+\[
+n \in
+\{20\,000,\,
+50\,000,\,
+100\,000,\,
+200\,000,\,
+581\,012\}.
+\]
+
+La seconde consiste à faire varier le nombre de partitions Spark :
+
+\[
+p \in \{1,2,4,8,16\}.
+\]
+
+Pour chaque configuration, le temps d'exécution du pipeline distribué est mesuré dans des conditions identiques. L'objectif est d'étudier d'une part l'évolution du coût de calcul lorsque le volume augmente et, d'autre part, la capacité de la construction locale des coresets et de leur fusion à exploiter le parallélisme disponible.
+
+Les mesures doivent également permettre de distinguer le gain obtenu par le calcul distribué du surcoût introduit par Spark, notamment l'ordonnancement des tâches, la sérialisation et la fusion des résultats intermédiaires.
+
+% À remplacer par les résultats expérimentaux une fois les mesures
+% de scalabilité terminées.
+
+
+\section{Optimisation du noyau local}
+\label{sec:eval-jmh}
+
+En complément des expériences portant directement sur StreamKM++ distribué, une optimisation de la représentation mémoire des points a été étudiée sur les couches \texttt{core} et \texttt{coreset}. Cette expérimentation est indépendante de Spark et vise uniquement à réduire le coût des opérations locales fréquemment exécutées par l'algorithme.
+
+\subsection{Hypothèse}
+
+L'implémentation initiale utilise une représentation de type \emph{Array of Structures} (AoS), dans laquelle les points sont stockés dans un \texttt{Array[Point]} et chaque objet \texttt{Point} contient son propre \texttt{Array[Double]}.
+
+Une représentation de type \emph{Structure of Arrays} (SoA) a été expérimentée avec la classe \texttt{PointsSoA}. Les coordonnées sont stockées de manière contiguë dans un \texttt{DoubleBuffer} construit à partir d'un \texttt{ByteBuffer.allocateDirect}.
+
+L'hypothèse était qu'une meilleure localité mémoire pouvait réduire le coût des accès aux coordonnées, notamment dans les opérations fréquemment appelées telles que \texttt{Distance.sqdist}, la recherche du centre le plus proche ou la construction du coreset.
+
+
+\subsection{Protocole JMH}
+
+Les deux représentations ont été comparées avec JMH~1.37 dans une JVM isolée. Les benchmarks utilisent cinq itérations de warmup, trente itérations de mesure et un fork. Le même JDK est utilisé pour les deux versions.
+
+Six opérations ont été isolées :
+
+\begin{itemize}
+    \item \texttt{sqdist} ;
+    \item \texttt{nearest} ;
+    \item \texttt{BucketManager.insertAll} ;
+    \item \texttt{CoresetTree.build} ;
+    \item \texttt{KMeans.lloyd} ;
+    \item le pipeline local complet.
+\end{itemize}
+
+Ces microbenchmarks ne mesurent pas les performances d'un job Spark. Leur objectif est uniquement d'isoler le coût des principales opérations du noyau algorithmique.
+
+
+\subsection{Résultats}
+
+Contrairement à l'hypothèse initiale, la variante SoA reposant sur un buffer hors tas est plus lente que la représentation AoS sur l'ensemble des benchmarks réalisés.
+
+\begin{table}[ht]
+\centering
+\small
+\begin{tabular}{lll}
+\toprule
+\textbf{Benchmark}
+& \textbf{Nature}
+& \textbf{Écart SoA vs AoS} \\
+\midrule
+\texttt{sqdist}
+    & calcul de distance
+    & $+46$ à $+77\,\%$ \\
+
+\texttt{nearest}
+    & recherche de centre
+    & $+45$ à $+51\,\%$ \\
+
+\texttt{insertAll}
+    & manipulation du buffer
+    & $+32$ à $+50\,\%$ \\
+
+\texttt{CoresetTree.build}
+    & construction du coreset
+    & $+36$ à $+59\,\%$ \\
+
+\texttt{lloyd}
+    & clustering
+    & $+20$ à $+30\,\%$ \\
+
+\texttt{fullPipeline}
+    & pipeline complet
+    & $+15$ à $+21\,\%$ \\
+\bottomrule
+\end{tabular}
+\caption{Écart relatif du temps moyen entre la représentation SoA hors tas et la représentation AoS.}
 \label{tab:jmh-soa-vs-aos}
 \end{table}
 
-\paragraph{Analyse.} Le profil de l'écart est le résultat le plus
-instructif : il est \textbf{maximal sur les opérations les plus pures}
-(\texttt{sqdist}, sans aucune allocation ni interaction avec le GC en jeu)
-et \textbf{s'atténue} à mesure que l'opération mesurée mêle davantage de
-calcul indépendant de la représentation des points (accumulation dans des
-tableaux \texttt{Array[Double]} on-heap pour \texttt{lloyd}, redémarrages
-$k$-means++ et construction d'arbre pour \texttt{fullPipeline}). Cette
-gradation pointe vers une cause structurelle unique, localisée dans l'accès
-lui-même : \texttt{java.nio.DoubleBuffer.get}/\texttt{put} effectue une
-vérification de bornes \emph{supplémentaire} par rapport à celle déjà faite
-par la JVM sur un \texttt{Array}, et ne bénéficie pas des mêmes intrinsics
-HotSpot (élimination de bornes-checks prouvée statiquement,
-auto-vectorisation SIMD) que des décennies d'ingénierie ont concentrées sur
-les tableaux primitifs. Le bénéfice théorique de localité mémoire du SoA
---- réel en principe --- est ici \emph{dominé} par le coût d'indirection de
-l'API \texttt{Buffer} choisie pour le matérialiser.
+L'écart est particulièrement important pour les opérations élémentaires telles que \texttt{sqdist} et \texttt{nearest}. Il devient plus faible lorsque le benchmark inclut davantage de calculs indépendants de la représentation mémoire, comme dans \texttt{lloyd} ou dans le pipeline complet.
 
-\paragraph{Ce que ce résultat ne remet pas en cause, et piste corrective.}
-Ce n'est pas le principe SoA qui est invalidé, mais le choix précis
-d'implémentation (\texttt{ByteBuffer.allocateDirect} + \texttt{DoubleBuffer}
-plutôt qu'un \texttt{Array[Double]} plat on-heap). Une variante SoA
-\emph{on-heap} capturerait la localité mémoire sans l'overhead
-d'indirection identifié ci-dessus, au prix de l'abandon du gain espéré sur
-la pression GC (hors-tas). Une comparaison à trois branches
-(AoS / SoA on-heap / SoA hors-tas) permettrait de décomposer précisément la
-contribution de chacun des deux axes pris séparément --- non menée dans le
-temps imparti à ce projet.
+Ces résultats indiquent que, dans l'implémentation testée, le bénéfice potentiel de la disposition contiguë des coordonnées ne compense pas le coût d'accès associé à l'utilisation de \texttt{DoubleBuffer}. Les tableaux primitifs de la JVM bénéficient également d'optimisations importantes de HotSpot, notamment sur les accès répétés dans les boucles de calcul.
+
+Ce résultat ne permet donc pas de conclure que le principe d'une représentation SoA est inadapté à StreamKM++. Il montre uniquement que la variante expérimentée avec \texttt{ByteBuffer.allocateDirect} et \texttt{DoubleBuffer} n'apporte pas d'amélioration dans ce contexte.
+
+Une variante reposant sur un tableau \texttt{Array[Double]} plat, conservé sur le tas, pourrait permettre de distinguer l'effet de la disposition SoA de celui du stockage hors tas. Cette expérimentation supplémentaire n'a toutefois pas été poursuivie dans le cadre du projet.
+
+Au vu des résultats obtenus, cette optimisation n'a pas été retenue comme élément central de l'implémentation finale.
+```

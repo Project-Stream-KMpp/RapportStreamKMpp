@@ -2,21 +2,16 @@
 \chapter{Introduction}
 \label{ch:introduction}
 
-Le clustering $k$-means classique suppose que l'ensemble des points tient en
-mémoire et peut être relu autant de fois que nécessaire. Cette hypothèse
-s'effondre dès que les données arrivent en flux continu : un capteur, un
-flux de clics, un flux de transactions. On ne peut ni tout stocker, ni
-relire deux fois le même point, et pourtant on veut un clustering de qualité
-comparable à ce qu'on obtiendrait en traitant les données par lots.
+Le clustering de grands volumes de données pose des contraintes particulières lorsque les observations arrivent sous forme de flux. Contrairement à une approche batch classique, il n'est pas toujours possible de conserver l'ensemble des données en mémoire ou de les parcourir plusieurs fois. Les algorithmes de clustering destinés aux flux doivent donc limiter leur consommation mémoire tout en maintenant une qualité de partitionnement satisfaisante.
 
-\textsc{StreamKM++} (Ackermann et al., 2012) répond à ce problème par la
-technique du \emph{coreset} : au lieu de conserver le flux, on en maintient
-un résumé pondéré de taille bornée $m$, construit incrémentalement, tel que
-le coût de clustering calculé sur ce résumé approxime le coût de clustering
-sur les données complètes, pour n'importe quel jeu de centres (Définition 2.2
-de la thèse de référence). Un seul passage sur les données suffit, et la
-mémoire utilisée ne dépend que de $m$ et $\log(n)$, jamais de $n$
-directement.
+StreamKM++, proposé par Ackermann et al. (2012), répond à cette problématique en construisant progressivement un \emph{coreset}, c'est-à-dire un résumé pondéré et de taille limitée des données observées. Le clustering final est ensuite calculé sur ce résumé à l'aide de k-means++, ce qui permet de réduire fortement la quantité de données manipulée lors de l'étape de clustering.
+
+Bitsakis (2018) a proposé une implémentation distribuée de StreamKM++ avec Apache Flink. Le présent projet étudie le portage de cette approche vers \textbf{Apache Spark}, en particulier au moyen des RDD et de Structured Streaming. L'objectif n'est pas uniquement de traduire l'implémentation existante, mais d'adapter le traitement aux mécanismes propres à Spark, notamment le partitionnement des données, les opérations de réduction arborescente et l'exécution par micro-batches.
+
+Le travail est organisé autour de trois objectifs. Le premier consiste à implémenter et valider les composants algorithmiques nécessaires à StreamKM++ : k-means pondéré, initialisation k-means++, construction du coreset et stratégie \emph{merge-and-reduce}. Le deuxième porte sur leur distribution avec Spark, chaque partition construisant un résumé local avant la fusion des résultats. Enfin, l'implémentation est évaluée expérimentalement afin d'étudier la qualité du clustering obtenu, l'influence de la taille du coreset et le comportement de la solution lorsque le volume de données et le parallélisme augmentent.
+
+L'architecture retenue sépare la logique algorithmique de l'orchestration distribuée. Les packages \texttt{streamkm.core} et \texttt{streamkm.coreset} contiennent les composants indépendants de Spark, tandis que \texttt{streamkm.spark} assure leur exécution distribuée. Cette organisation permet de vérifier séparément la correction de l'algorithme avant d'évaluer son comportement dans un environnement Spark.
+
 
 \paragraph{Objet de ce rapport.} Bitsakis (2018) implémente StreamKM++ dans
 Apache Flink et l'évalue de façon approfondie (chapitres 4 et 5 de sa
