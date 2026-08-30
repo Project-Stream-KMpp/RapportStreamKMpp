@@ -12,7 +12,43 @@
 \usepackage{graphicx}
 \usepackage{hyperref}
 \usepackage{geometry}
+\usepackage{xcolor}
+\usepackage{pgfplots}
+\pgfplotsset{compat=1.18}
+\usepackage{caption}
+\usepackage{todonotes}
+\usepackage{listings}
+
 \geometry{margin=2.5cm}
+
+\newcommand{\code}[1]{\texttt{#1}}
+
+\lstset{
+  basicstyle=\ttfamily\footnotesize,
+  breaklines=true,
+  breakatwhitespace=false,
+  showstringspaces=false,
+  tabsize=2,
+  numbers=left,
+  numberstyle=\tiny\color{gray},
+  frame=single,
+  extendedchars=true,
+  literate=%
+    {é}{{\'e}}1 {è}{{\`e}}1 {à}{{\`a}}1 {ù}{{\`u}}1 {â}{{\^a}}1
+    {ê}{{\^e}}1 {î}{{\^i}}1 {ô}{{\^o}}1 {û}{{\^u}}1 {ç}{{\c c}}1
+    {ë}{{\"e}}1 {ï}{{\"i}}1 {ü}{{\"u}}1 {œ}{{\oe}}1
+    {É}{{\'E}}1 {È}{{\`E}}1 {À}{{\`A}}1 {Ê}{{\^E}}1 {Î}{{\^I}}1
+    {Ï}{{\"I}}1 {Û}{{\^U}}1 {Ç}{{\c C}}1
+    {°}{{\textdegree}}1 {²}{{\textsuperscript{2}}}1
+    {§}{{\S}}1 {«}{{\guillemotleft}}1 {»}{{\guillemotright}}1
+    {·}{{\textperiodcentered}}1 {—}{{\textemdash}}1
+    {₂}{{$_2$}}1 {ℓ}{{$\ell$}}1
+    {Σ}{{$\Sigma$}}1 {δ}{{$\delta$}}1 {ε}{{$\varepsilon$}}1 {μ}{{$\mu$}}1
+    {→}{{$\rightarrow$}}1 {←}{{$\leftarrow$}}1 {∈}{{$\in$}}1 {−}{{$-$}}1 {∝}{{$\propto$}}1
+    {∪}{{$\cup$}}1 {≈}{{$\approx$}}1 {≥}{{$\geq$}}1 {‖}{{$\|$}}1
+    {⚠}{{[!]}}1 {️}{{}}1,
+  captionpos=b
+}
 
 % Marqueur "reste à faire" --- sans dépendance à un package externe
 % (todonotes) : chercher "PLACEHOLDER" dans les sources pour tout localiser
@@ -26,7 +62,7 @@
 \title{StreamKM++ sur Apache Spark \\
   \large Portage d'une implémentation Flink vers Spark}
 \author{% TODO : noms des membres du groupe
-  Groupe StreamKM++ --- M2, déploiement ML à grande échelle, Dauphine}
+  Groupe Jules MAURICE, Asma BEN-ZINE, Victorien GBAGUIDI}
 \date{Août 2026}
 
 \begin{document}
@@ -41,6 +77,9 @@
 \input{ch5_evaluation.tex}
 \input{ch6_discussion.tex}
 \input{ch7_conclusion.tex}
+
+\appendix
+\input{appendix/appendix_code}
 
 \begin{thebibliography}{9}
 
@@ -61,7 +100,5 @@ David Arthur, Sergei Vassilvitskii.
 Proceedings of the 18th annual ACM-SIAM symposium on Discrete algorithms, 2007.
 
 \end{thebibliography}
-
-\input{annexes.tex}
 
 \end{document}
