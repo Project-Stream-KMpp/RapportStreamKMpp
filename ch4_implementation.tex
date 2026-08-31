@@ -36,8 +36,8 @@ def partialCoresets(rdd: RDD[Point], p: StreamKMParams): RDD[Array[Point]] =
 
 La graine de chaque \texttt{BucketManager} est dérivée de l'indice de
 partition (\texttt{p.seed + idx}) plutôt que partagée entre partitions ---
-condition nécessaire pour que l'expérience E3bis
-(chapitre~\ref{ch:evaluation}) reste interprétable : avec une graine
+condition nécessaire pour que l'expérience de sensibilité au nombre de
+partitions (chapitre~\ref{ch:evaluation}) reste interprétable : avec une graine
 partagée, changer le nombre de partitions changerait aussi la suite
 aléatoire consommée par chaque partition, confondant l'effet mesuré (le
 partitionnement) avec un simple changement de graine.
@@ -207,16 +207,15 @@ d'équivalent dans la thèse : c'est notre contribution propre.
     partiels. L'opérateur non-parallèle de la thèse (\S\ref{sec:impl-dataflow})
     devient une réduction en arbre (\texttt{treeReduce}), ce qui repousse
     directement le plafond de speedup identifié au §5.3.1 de la thèse ---
-    à confirmer expérimentalement (chapitre~\ref{ch:evaluation},
-    expérience E7).
+    à confirmer expérimentalement (chapitre~\ref{ch:evaluation}).
   \item \textbf{Se traduit à l'identique, en plus concis} : la méthodologie
     d'évaluation du coût (§\ref{sec:impl-evaluation}) --- trois opérateurs
     Flink dédiés et un \emph{connected stream} deviennent trois lignes de
     \texttt{broadcast} + \texttt{treeReduce}.
   \item \textbf{Se traduit, avec un degré de liberté nouveau} : le
     parallélisme. Le couplage partitions/c\oe{}urs de Flink se découple côté
-    Spark (§\ref{sec:spark-partitions-coeurs}), ce qui permet une expérience
-    (E3bis) que le modèle de Flink ne permet pas.
+    Spark (§\ref{sec:spark-partitions-coeurs}), ce qui permet une expérience de
+    sensibilité au nombre de partitions que le modèle de Flink ne permet pas.
   \item \textbf{Ne se traduit pas} : Queryable State
     (§\ref{sec:impl-requetes}). C'est la seule perte de fonctionnalité nette
     identifiée dans ce portage --- discutée au chapitre~\ref{ch:discussion}.
