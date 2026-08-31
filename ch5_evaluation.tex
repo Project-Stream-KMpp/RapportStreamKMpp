@@ -222,8 +222,22 @@ Il apparaît donc un compromis entre la quantité d'information conservée dans 
 
 Les versions séquentielle et Spark restent par ailleurs très proches pour toutes les valeurs de $m$. L'écart maximal observé est inférieur à $0.8\,\%$. Pour $m=10000$ et $m=20000$, les coûts obtenus par les deux implémentations sont pratiquement identiques.
 
-Ces résultats renforcent l'observation effectuée lors de l'étude de $k$ : la construction distribuée du coreset fournit une approximation dont la qualité reste très proche de celle obtenue avec l'implémentation séquentielle.
+Ces résultats renforcent l'observation effectuée lors de l'étude de $k$ :
+la construction distribuée du coreset fournit une approximation dont la
+qualité reste très proche de celle obtenue avec l'implémentation séquentielle.
 
+Dans l'ensemble, les résultats présentent un comportement cohérent avec
+les propriétés attendues de l'algorithme. La SSE diminue lorsque le nombre
+de clusters augmente et tend également à diminuer lorsque la taille du
+coreset augmente. Les versions séquentielle et distribuée de StreamKM++
+produisent des coûts très proches, avec un écart inférieur à $0.7\,\%$
+pour les configurations étudiées lors de la variation de $k$. Les coûts
+obtenus restent également proches de ceux de Spark MLlib.
+
+Ces observations constituent une validation expérimentale encourageante
+de l'implémentation. Toutefois, des répétitions avec plusieurs graines
+seraient nécessaires pour quantifier la variabilité des résultats et
+renforcer les conclusions de cette évaluation.
 
 \subsection{Limites de l'évaluation de qualité}
 \label{sec:eval-quality-limits}
