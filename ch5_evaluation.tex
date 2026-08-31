@@ -1,17 +1,22 @@
-```latex
 % !TeX root = main.tex
 
-\chapter{Évaluation expérimentale} \label{ch:evaluation} Ce chapitre présente l'évaluation expérimentale de l'implémentation de StreamKM++ réalisée dans le cadre du projet. L'objectif est d'abord de vérifier la correction des principales briques algorithmiques, puis d'étudier la qualité du clustering obtenu sur un jeu de données réel. Une expérimentation complémentaire porte également sur la représentation mémoire des points et son influence sur les performances du noyau local. Cette progression permet de valider dans un premier temps la conformité des résultats produits avant d'étudier une piste d'optimisation de l'implémentation.
+\chapter{Évaluation expérimentale}
+\label{ch:evaluation}
+
+Ce chapitre présente l'évaluation expérimentale de l'implémentation de StreamKM++. L'objectif principal est d'étudier la qualité du clustering obtenu avec la version distribuée et de la comparer à l'implémentation séquentielle ainsi qu'à Spark MLlib. L'influence du nombre de clusters et de la taille du coreset est étudiée sur le jeu de données Covertype. Une expérimentation complémentaire analyse également l'effet d'une représentation mémoire alternative sur les performances du noyau local.
+
 % ---------------------------------------------------------------------------
 \section{Protocole expérimental}
 \label{sec:eval-protocole}
 % ---------------------------------------------------------------------------
 
-Les expériences principales sont réalisées sur le jeu de données Covertype, qui contient 581\,012 observations décrites par 54 attributs numériques utilisés pour le clustering. La dernière colonne, correspondant à la classe associée à chaque observation, n'est pas utilisée puisque StreamKM++ repose sur un apprentissage non supervisé.
+Les expériences de qualité sont réalisées sur le jeu de données Covertype. Celui-ci contient 581\,012 observations décrites par 54 attributs numériques utilisés pour le clustering. La dernière colonne, correspondant à la classe associée à chaque observation, n'est pas utilisée puisque l'algorithme étudié repose sur un apprentissage non supervisé.
 
-Pour les expériences distribuées de qualité, Apache Spark est configuré avec huit partitions. Chaque partition traite une partie des observations et construit un coreset local. Les résumés obtenus sont ensuite fusionnés afin de produire un coreset global sur lequel le clustering final est calculé.
+Pour les expériences distribuées, Apache Spark est configuré avec huit partitions. Chaque partition traite une partie des observations et construit un coreset local. Les résumés obtenus sont ensuite fusionnés afin de produire un coreset global sur lequel les centres finaux sont calculés.
 
-Une graine fixe égale à 2026 est utilisée afin de rendre les différentes configurations reproductibles. Chaque configuration de qualité est exécutée une seule fois. Les résultats permettent donc de comparer les approches dans des conditions identiques, mais ne permettent pas de mesurer précisément la variabilité liée aux étapes aléatoires de StreamKM++ et de k-means++.
+Une graine fixe égale à 2026 est utilisée afin de rendre les différentes configurations reproductibles. Chaque configuration est exécutée une seule fois. Ce protocole permet de comparer les différentes approches dans des conditions identiques, mais ne permet pas de mesurer la variabilité associée aux étapes aléatoires de StreamKM++ et de l'initialisation k-means++.
+
+Avant ces expériences, des tests unitaires et déterministes ont été réalisés sur les principaux composants de l'implémentation. Ils vérifient notamment le calcul des distances, le fonctionnement du k-means pondéré, la conservation de la masse lors de la construction et de la fusion des coresets ainsi que le chargement des 54 attributs utilisés pour Covertype.
 
 La qualité du clustering est évaluée à l'aide de la somme des erreurs quadratiques, ou \emph{Sum of Squared Errors} (SSE). Pour un ensemble de données \(X\) et un ensemble de centres \(C\), cette mesure est définie par :
 
@@ -23,9 +28,9 @@ La qualité du clustering est évaluée à l'aide de la somme des erreurs quadra
 \|x-c\|^2.
 \]
 
-Une valeur plus faible indique que les observations sont, en moyenne, plus proches du centre auquel elles sont affectées.
+Une valeur de SSE plus faible signifie que les observations sont globalement plus proches du centre auquel elles sont affectées.
 
-Dans les expériences présentées ici, le coreset est utilisé uniquement pour déterminer les centres. La SSE est ensuite calculée sur l'ensemble des observations originales. Cette distinction permet d'évaluer la qualité du clustering sur le jeu de données complet et non uniquement sur son résumé.
+Dans les expériences réalisées, le coreset est utilisé pour déterminer les centres, mais la SSE est ensuite calculée sur l'ensemble des observations originales. La comparaison porte ainsi sur la qualité du clustering obtenu sur le jeu de données complet et non uniquement sur son résumé.
 
 Trois approches sont comparées :
 
@@ -35,79 +40,14 @@ Trois approches sont comparées :
     \item K-Means de Spark MLlib.
 \end{itemize}
 
-La version séquentielle constitue une référence interne permettant d'observer l'effet de la distribution de la construction du coreset. Spark MLlib fournit quant à lui une référence externe. Contrairement à StreamKM++, MLlib applique K-Means directement aux données distribuées, sans construction préalable d'un coreset. La comparaison porte donc sur la qualité des centres obtenus et non sur une équivalence stricte entre les deux approches.
-
-% ---------------------------------------------------------------------------
-\section{Validation de l'implémentation}
-\label{sec:eval-validation}
-% ---------------------------------------------------------------------------
-
-Avant les expériences sur Covertype, plusieurs tests déterministes ont été réalisés afin de vérifier séparément les principales briques de l'implémentation.
-
-Ces tests permettent notamment de détecter d'éventuelles erreurs dans le calcul des distances, la prise en compte des poids ou les opérations de fusion, qui pourraient autrement produire des résultats numériquement plausibles mais incorrects.
-
-Les principaux tests réalisés sont résumés dans le tableau~\ref{tab:validation-implementation}.
-
-\begin{table}[ht]
-\centering
-\small
-\begin{tabular}{lll}
-\toprule
-\textbf{Test} &
-\textbf{Résultat attendu} &
-\textbf{Résultat obtenu} \\
-\midrule
-
-Distance euclidienne au carré
-    & \(25\)
-    & \(25\) \\
-
-K-Means déterministe
-    & SSE \(=4\)
-    & SSE \(=4\) \\
-
-K-Means pondéré
-    & centre \((2.5,0)\), SSE \(=75\)
-    & conforme \\
-
-Construction du coreset
-    & masse conservée
-    & conforme \\
-
-BucketManager
-    & masse conservée
-    & conforme \\
-
-Lecture de Covertype
-    & \(54\) dimensions
-    & conforme \\
-
-\bottomrule
-\end{tabular}
-\caption{Validation des principales briques de l'implémentation.}
-\label{tab:validation-implementation}
-\end{table}
-
-Le premier test vérifie le calcul de la distance euclidienne au carré à partir de deux points dont le résultat attendu peut être déterminé manuellement. La valeur obtenue, égale à 25, correspond au résultat attendu.
-
-Le deuxième test porte sur l'algorithme de Lloyd appliqué à un petit jeu de données déterministe. La SSE obtenue est égale à 4, conformément au résultat attendu.
-
-Un test spécifique vérifie également la prise en compte des poids. Pour le jeu de données considéré, le centre attendu est \((2.5,0)\) et la SSE attendue est égale à 75. Le résultat obtenu est conforme.
-
-Les tests appliqués au coreset et au \texttt{BucketManager} vérifient la conservation de la masse. La somme des poids des représentants doit rester égale à la masse totale des observations représentées, y compris après plusieurs opérations de réduction et de fusion.
-
-Enfin, le chargement de Covertype a été contrôlé afin de vérifier que chaque observation est correctement transformée en un vecteur de 54 dimensions après suppression de la variable de classe.
-
-Ces tests ne constituent pas une évaluation de la qualité du clustering à grande échelle, mais permettent de vérifier les principales propriétés de l'implémentation avant son application au jeu de données complet.
+La version séquentielle constitue une référence interne permettant d'observer l'effet de la construction distribuée du coreset. Spark MLlib fournit une référence externe en appliquant K-Means directement aux données distribuées, sans construction préalable d'un coreset. La comparaison porte donc sur la qualité des centres obtenus et non sur une équivalence stricte entre les méthodes.
 
 % ---------------------------------------------------------------------------
 \section{Qualité du clustering sur Covertype}
 \label{sec:eval-qualite}
 % ---------------------------------------------------------------------------
 
-Les expériences de qualité utilisent les 581\,012 observations de Covertype. Deux paramètres sont étudiés : le nombre de clusters \(k\) et la taille maximale \(m\) du coreset.
-
-L'objectif est d'observer l'évolution de la SSE lorsque le nombre de centres augmente, puis d'étudier l'effet de la taille du coreset sur la qualité du clustering obtenu.
+Deux paramètres sont étudiés : le nombre de clusters \(k\) et la taille maximale \(m\) du coreset. La première expérience analyse l'évolution de la SSE lorsque le nombre de centres augmente. La seconde étudie l'influence de la quantité d'information conservée dans le coreset.
 
 % ---------------------------------------------------------------------------
 \subsection{Influence du nombre de clusters}
@@ -126,7 +66,7 @@ Pour chaque valeur de \(k\), la taille du coreset est définie par :
 m = 200k.
 \]
 
-Le tableau~\ref{tab:quality-k} présente les résultats obtenus avec les trois méthodes.
+Le tableau~\ref{tab:quality-k} présente les résultats obtenus.
 
 \begin{table}[ht]
 \centering
@@ -138,13 +78,11 @@ Le tableau~\ref{tab:quality-k} présente les résultats obtenus avec les trois m
 \textbf{StreamKM++ Spark} &
 \textbf{Spark MLlib} \\
 \midrule
-
 10 & \(3.400 \times 10^{11}\) & \(3.393 \times 10^{11}\) & \(3.388 \times 10^{11}\) \\
 20 & \(2.027 \times 10^{11}\) & \(2.040 \times 10^{11}\) & \(2.023 \times 10^{11}\) \\
 30 & \(1.546 \times 10^{11}\) & \(1.545 \times 10^{11}\) & \(1.533 \times 10^{11}\) \\
 40 & \(1.298 \times 10^{11}\) & \(1.293 \times 10^{11}\) & \(1.281 \times 10^{11}\) \\
 50 & \(1.144 \times 10^{11}\) & \(1.139 \times 10^{11}\) & \(1.125 \times 10^{11}\) \\
-
 \bottomrule
 \end{tabular}
 \caption{Influence du nombre de clusters sur la SSE pour les 581\,012 observations de Covertype, avec \(m=200k\).}
@@ -153,38 +91,38 @@ Le tableau~\ref{tab:quality-k} présente les résultats obtenus avec les trois m
 
 Pour les trois méthodes, la SSE diminue nettement lorsque le nombre de clusters augmente. Elle passe d'environ \(3.4 \times 10^{11}\) pour \(k=10\) à environ \(1.1 \times 10^{11}\) pour \(k=50\).
 
-Ce comportement est cohérent avec le fonctionnement de K-Means : l'augmentation du nombre de centres permet une représentation plus fine des données et réduit la distance entre les observations et leur centre le plus proche.
+Ce comportement est cohérent avec le fonctionnement de K-Means. Lorsque le nombre de centres augmente, les observations peuvent être représentées par des clusters plus fins, ce qui réduit leur distance au centre le plus proche.
 
-Les versions séquentielle et distribuée de StreamKM++ produisent des résultats très proches. Pour toutes les valeurs de \(k\) testées, l'écart relatif entre leurs SSE reste inférieur à \(0.7\,\%\). L'écart maximal est observé pour \(k=20\), avec environ \(0.65\,\%\).
+Les résultats obtenus avec les versions séquentielle et distribuée de StreamKM++ sont très proches. Pour toutes les valeurs de \(k\) étudiées, l'écart relatif entre leurs SSE reste inférieur à \(0.7\,\%\). L'écart maximal est observé pour \(k=20\), avec environ \(0.65\,\%\).
 
-Les différences observées peuvent notamment s'expliquer par l'ordre de construction et de fusion des coresets ainsi que par les étapes aléatoires intervenant dans l'algorithme. Elles restent toutefois faibles au regard des valeurs de SSE obtenues.
+Les différences observées peuvent s'expliquer par l'ordre de construction et de fusion des coresets ainsi que par les étapes aléatoires de l'algorithme. Elles restent néanmoins faibles au regard des coûts obtenus.
 
-Ces résultats montrent que, dans les configurations étudiées, la distribution de la construction du coreset entre les partitions Spark ne conduit pas à une dégradation notable de la qualité du clustering par rapport à l'implémentation séquentielle.
+Dans les configurations testées, la distribution de la construction du coreset entre les partitions Spark ne conduit donc pas à une dégradation notable de la qualité du clustering par rapport à l'implémentation séquentielle.
 
 % ---------------------------------------------------------------------------
 \subsection{Comparaison avec Spark MLlib}
 \label{sec:eval-mllib}
 % ---------------------------------------------------------------------------
 
-Les résultats du tableau~\ref{tab:quality-k} montrent également que les SSE obtenues avec Spark MLlib restent proches de celles de StreamKM++.
+Les résultats du tableau~\ref{tab:quality-k} montrent également que les SSE produites par Spark MLlib restent proches de celles obtenues avec StreamKM++.
 
-Pour toutes les valeurs de \(k\) testées, MLlib produit une SSE légèrement inférieure à celle de StreamKM++ Spark. L'écart est d'environ \(0.15\,\%\) pour \(k=10\), reste inférieur à \(1\,\%\) pour \(k=20\), \(30\) et \(40\), puis atteint environ \(1.24\,\%\) pour \(k=50\).
+Pour toutes les valeurs de \(k\) testées, MLlib obtient une SSE légèrement inférieure à celle de StreamKM++ Spark. L'écart est d'environ \(0.15\,\%\) pour \(k=10\), reste inférieur à \(1\,\%\) pour \(k=20\), \(30\) et \(40\), puis atteint environ \(1.24\,\%\) pour \(k=50\).
 
-Cette différence doit être interprétée en tenant compte du fonctionnement des deux approches. Spark MLlib applique K-Means directement à l'ensemble des observations distribuées, tandis que StreamKM++ détermine les centres à partir d'un résumé pondéré de taille limitée.
+Cette différence doit être interprétée en tenant compte du fonctionnement des deux approches. Spark MLlib applique K-Means directement à l'ensemble des observations distribuées, tandis que StreamKM++ construit d'abord un résumé pondéré de taille limitée puis détermine les centres à partir de ce résumé.
 
-La construction du coreset introduit ainsi une approximation supplémentaire. Malgré cette réduction des données, les SSE obtenues restent proches de celles produites par MLlib dans les configurations testées.
+La construction du coreset introduit donc une approximation supplémentaire. Malgré cette réduction du jeu de données utilisé pour le calcul des centres, les SSE obtenues restent proches de celles de MLlib dans les configurations testées.
 
-Ces résultats indiquent que le coreset conserve suffisamment d'information pour produire des centres dont la qualité reste proche de celle obtenue par une exécution directe de K-Means sur les données distribuées.
+Ces résultats montrent ainsi que le coreset conserve suffisamment d'information pour produire un clustering dont la qualité reste proche de celle obtenue en appliquant directement K-Means aux données distribuées.
 
 % ---------------------------------------------------------------------------
 \subsection{Influence de la taille du coreset}
 \label{sec:eval-m}
 % ---------------------------------------------------------------------------
 
-La deuxième série d'expériences étudie l'influence de la taille du coreset. Le nombre de clusters est fixé à :
+La deuxième expérience étudie l'influence de la taille du coreset. Le nombre de clusters est fixé à :
 
 \[
-k=25,
+k = 25,
 \]
 
 et les tailles suivantes sont testées :
@@ -193,7 +131,7 @@ et les tailles suivantes sont testées :
 m \in \{1000,5000,10000,20000\}.
 \]
 
-Les résultats sont présentés dans le tableau~\ref{tab:quality-m}.
+Le tableau~\ref{tab:quality-m} présente les résultats obtenus.
 
 \begin{table}[ht]
 \centering
@@ -204,68 +142,61 @@ Les résultats sont présentés dans le tableau~\ref{tab:quality-m}.
 \textbf{StreamKM++ séquentiel} &
 \textbf{StreamKM++ Spark} \\
 \midrule
-
-1\,000  & \(1.807 \times 10^{11}\) & \(1.820 \times 10^{11}\) \\
+1\,000  & \(1.807 \times 10^{11}\) & \(1.811 \times 10^{11}\) \\
 5\,000  & \(1.748 \times 10^{11}\) & \(1.759 \times 10^{11}\) \\
-10\,000 & \(1.746 \times 10^{11}\) & \(1.745 \times 10^{11}\) \\
-20\,000 & \(1.742 \times 10^{11}\) & \(1.740 \times 10^{11}\) \\
-
+10\,000 & \(1.746 \times 10^{11}\) & \(1.744 \times 10^{11}\) \\
+20\,000 & \(1.742 \times 10^{11}\) & \(1.739 \times 10^{11}\) \\
 \bottomrule
 \end{tabular}
 \caption{Influence de la taille du coreset pour \(k=25\) sur les 581\,012 observations de Covertype.}
 \label{tab:quality-m}
 \end{table}
 
-Dans cette expérience, l'augmentation de la taille du coreset s'accompagne d'une diminution de la SSE pour les deux implémentations.
+Dans cette expérience, la SSE diminue lorsque la taille du coreset augmente pour les deux implémentations.
 
-Pour la version séquentielle, le coût passe de \(1.807 \times 10^{11}\) avec \(m=1000\) à \(1.742 \times 10^{11}\) avec \(m=20000\). La version Spark suit une évolution similaire, avec une diminution de \(1.820 \times 10^{11}\) à \(1.740 \times 10^{11}\).
+Pour la version séquentielle, elle passe de \(1.807 \times 10^{11}\) avec \(m=1000\) à \(1.742 \times 10^{11}\) avec \(m=20000\). La version Spark présente une évolution similaire, avec une diminution de \(1.811 \times 10^{11}\) à \(1.739 \times 10^{11}\).
 
-La diminution la plus importante est observée entre \(m=1000\) et \(m=5000\). Pour les valeurs supérieures, l'amélioration devient plus faible.
+La diminution la plus importante est observée entre \(m=1000\) et \(m=5000\). Pour les valeurs supérieures, le gain devient plus faible.
 
-Ce comportement est cohérent avec le rôle du coreset. Un résumé plus grand conserve davantage d'information sur les données originales et peut ainsi améliorer l'approximation du problème de clustering. Dans les résultats obtenus, l'apport supplémentaire devient toutefois limité lorsque la taille du résumé augmente.
+Ce comportement est cohérent avec le rôle du coreset. Une taille plus importante permet de conserver davantage d'information sur les données originales et peut ainsi améliorer la qualité de l'approximation. Les résultats montrent cependant que l'amélioration supplémentaire devient limitée lorsque la taille du résumé augmente.
 
-Il apparaît ainsi un compromis entre la quantité d'information conservée et la taille du coreset manipulé lors des étapes suivantes.
+Il apparaît ainsi un compromis entre la quantité d'information conservée et la taille du coreset manipulé lors du clustering final.
 
-Les versions séquentielle et distribuée restent très proches pour toutes les valeurs de \(m\). L'écart relatif maximal est d'environ \(0.63\,\%\), observé pour \(m=5000\). Pour \(m=10000\) et \(m=20000\), les différences sont inférieures à \(0.2\,\%\).
+Les versions séquentielle et distribuée restent également très proches pour toutes les valeurs de \(m\). L'écart relatif maximal est observé pour \(m=5000\) et reste inférieur à \(0.7\,\%\). Pour \(m=10000\) et \(m=20000\), les différences sont très faibles.
 
-Ces résultats confirment l'observation réalisée lors de l'étude de \(k\) : la construction distribuée du coreset fournit une approximation dont la qualité reste très proche de celle obtenue avec l'implémentation séquentielle.
-
-Dans l'ensemble, les résultats obtenus présentent un comportement cohérent avec les propriétés attendues de l'algorithme. La SSE diminue lorsque le nombre de clusters augmente et, dans les configurations étudiées, diminue également lorsque la taille du coreset augmente. Les versions séquentielle et distribuée de StreamKM++ produisent des coûts très proches, tandis que les résultats restent également comparables à ceux obtenus avec Spark MLlib.
-
-Ces observations constituent une validation expérimentale encourageante de l'implémentation. Des répétitions avec plusieurs graines seraient toutefois nécessaires pour mesurer la variabilité des résultats et renforcer les conclusions obtenues.
+Ces résultats confirment les observations obtenues lors de la variation de \(k\). La construction distribuée du coreset fournit, dans les configurations étudiées, une approximation dont la qualité reste proche de celle de l'implémentation séquentielle.
 
 % ---------------------------------------------------------------------------
-\subsection{Limites de l'évaluation de qualité}
+\subsection{Limites de l'évaluation}
 \label{sec:eval-quality-limits}
 % ---------------------------------------------------------------------------
 
-Les expériences précédentes permettent de comparer les différentes approches sur l'ensemble du jeu de données Covertype, mais plusieurs limites doivent être prises en compte.
+Les résultats précédents doivent être interprétés en tenant compte de certaines limites du protocole expérimental.
 
-La première concerne le nombre d'exécutions. Chaque configuration a été testée une seule fois avec une graine fixée à 2026. Ce choix assure la reproductibilité des comparaisons, mais ne permet pas de mesurer la variabilité liée aux étapes aléatoires de l'algorithme.
+Chaque configuration a été exécutée une seule fois avec une graine fixée à 2026. Ce choix permet de reproduire les expériences, mais ne permet pas de mesurer la variabilité associée aux étapes aléatoires de StreamKM++ et de k-means++.
 
-Une évaluation plus complète pourrait répéter chaque configuration avec plusieurs graines et présenter notamment la moyenne et l'écart-type des résultats obtenus.
+Une évaluation plus complète pourrait répéter chaque configuration avec plusieurs graines et présenter notamment la moyenne et l'écart-type des SSE obtenues.
 
-La seconde limite concerne la métrique utilisée. La SSE mesure la compacité des clusters mais ne permet pas, à elle seule, d'évaluer de manière absolue la pertinence du partitionnement obtenu. Dans le cadre de ce projet, elle est principalement utilisée comme métrique commune pour comparer les différentes implémentations dans des conditions identiques.
-
+La seconde limite concerne la métrique utilisée. La SSE mesure la compacité des clusters, mais ne permet pas à elle seule d'évaluer de manière absolue la pertinence du partitionnement. Dans ce projet, elle est principalement utilisée comme métrique commune afin de comparer les différentes implémentations dans des conditions identiques.
 
 % ---------------------------------------------------------------------------
 \section{Optimisation du noyau local}
 \label{sec:eval-jmh}
 % ---------------------------------------------------------------------------
 
-En complément des expériences principales, une optimisation de la représentation mémoire des points a été étudiée sur les composants locaux de l'algorithme.
+En complément de l'étude de la qualité du clustering, une expérimentation a été menée sur la représentation mémoire des points. Elle concerne les composants locaux de l'algorithme et est indépendante de l'exécution distribuée avec Spark.
 
-Cette expérimentation est indépendante de Spark. Elle vise à déterminer si une organisation différente des coordonnées peut améliorer les performances des opérations fréquemment exécutées lors du clustering et de la construction des coresets.
+L'objectif est de déterminer si une organisation différente des coordonnées permet d'améliorer les performances des opérations fréquemment exécutées lors du calcul des distances, du clustering et de la construction des coresets.
 
 % ---------------------------------------------------------------------------
-\subsection{Hypothèse}
+\subsection{Représentations étudiées}
 % ---------------------------------------------------------------------------
 
-L'implémentation initiale repose sur une représentation de type \emph{Array of Structures} (AoS), dans laquelle les points sont stockés dans un \texttt{Array[Point]} et chaque objet \texttt{Point} contient son propre \texttt{Array[Double]}.
+L'implémentation initiale utilise une représentation de type \emph{Array of Structures} (AoS). Les points sont stockés dans un \texttt{Array[Point]} et chaque objet \texttt{Point} contient son propre \texttt{Array[Double]}.
 
-Une seconde représentation, de type \emph{Structure of Arrays} (SoA), a été développée dans \texttt{streamkm.core.PointsSoA}. Les coordonnées sont stockées de manière contiguë dans un \texttt{DoubleBuffer} reposant sur un \texttt{ByteBuffer.allocateDirect}.
+Une seconde représentation de type \emph{Structure of Arrays} (SoA) a été développée dans \texttt{streamkm.core.PointsSoA}. Les coordonnées sont stockées de manière contiguë dans un \texttt{DoubleBuffer} reposant sur un \texttt{ByteBuffer.allocateDirect}.
 
-L'hypothèse testée est qu'une disposition plus contiguë des coordonnées peut améliorer la localité mémoire et réduire le coût des accès lors des opérations intensives, notamment le calcul des distances, la recherche du centre le plus proche et la construction du coreset.
+L'hypothèse étudiée est qu'une organisation plus contiguë des coordonnées peut améliorer la localité mémoire et réduire le coût des accès lors des opérations intensives.
 
 % ---------------------------------------------------------------------------
 \subsection{Protocole JMH}
@@ -273,9 +204,9 @@ L'hypothèse testée est qu'une disposition plus contiguë des coordonnées peut
 
 Les deux représentations ont été comparées à l'aide de JMH 1.37.
 
-Les benchmarks ont été exécutés avec cinq itérations de préchauffage, trente itérations de mesure et un fork. Le même environnement Java est utilisé pour les deux représentations afin de conserver des conditions de comparaison identiques.
+Les benchmarks ont été exécutés avec cinq itérations de préchauffage, trente itérations de mesure et un fork, dans le même environnement Java pour les deux représentations.
 
-Six opérations sont évaluées :
+Six opérations ont été évaluées :
 
 \begin{itemize}
     \item \texttt{sqdist} ;
@@ -286,13 +217,13 @@ Six opérations sont évaluées :
     \item le pipeline local complet.
 \end{itemize}
 
-Ces microbenchmarks évaluent uniquement les performances du noyau local et ne permettent pas de déduire directement les performances d'un pipeline Spark complet.
+Ces benchmarks portent uniquement sur le noyau local de l'algorithme. Ils ne permettent donc pas de tirer directement des conclusions sur les performances d'un pipeline Spark complet.
 
 % ---------------------------------------------------------------------------
 \subsection{Résultats}
 % ---------------------------------------------------------------------------
 
-Contrairement à l'hypothèse initiale, la représentation SoA utilisant un buffer hors tas s'est révélée plus lente que la représentation AoS pour l'ensemble des benchmarks réalisés.
+Contrairement à l'hypothèse initiale, la représentation SoA reposant sur un buffer hors tas s'est révélée plus lente que la représentation AoS pour l'ensemble des opérations évaluées.
 
 \begin{table}[ht]
 \centering
@@ -303,59 +234,51 @@ Contrairement à l'hypothèse initiale, la représentation SoA utilisant un buff
 \textbf{Nature} &
 \textbf{Écart SoA par rapport à AoS} \\
 \midrule
-
 \texttt{sqdist}
     & calcul de distance
     & \(+46\) à \(+77\,\%\) \\
-
 \texttt{nearest}
     & recherche du centre
     & \(+45\) à \(+51\,\%\) \\
-
 \texttt{insertAll}
     & construction du résumé
     & \(+32\) à \(+50\,\%\) \\
-
 \texttt{CoresetTree.build}
     & construction du coreset
     & \(+36\) à \(+59\,\%\) \\
-
 \texttt{lloyd}
     & clustering
     & \(+20\) à \(+30\,\%\) \\
-
 \texttt{fullPipeline}
     & pipeline complet
     & \(+15\) à \(+21\,\%\) \\
-
 \bottomrule
 \end{tabular}
 \caption{Écart relatif du temps moyen entre la représentation SoA hors tas et la représentation AoS.}
 \label{tab:jmh-soa-vs-aos}
 \end{table}
 
-Les écarts les plus importants concernent les opérations directement dépendantes des accès aux coordonnées, notamment \texttt{sqdist} et \texttt{nearest}. Ils deviennent plus faibles lorsque le benchmark inclut davantage d'opérations indépendantes de la représentation mémoire, comme pour l'algorithme de Lloyd ou le pipeline complet.
+Les écarts les plus importants sont observés pour les opérations directement dépendantes des accès aux coordonnées, notamment \texttt{sqdist} et \texttt{nearest}. Ils sont moins élevés lorsque le benchmark comprend davantage de traitements qui ne dépendent pas directement de la représentation mémoire, comme dans l'algorithme de Lloyd ou le pipeline complet.
 
-Dans l'implémentation testée, le bénéfice attendu d'une disposition contiguë des coordonnées ne compense donc pas le coût des accès via \texttt{DoubleBuffer}.
+Dans l'implémentation étudiée, le bénéfice attendu d'un stockage contigu des coordonnées ne compense donc pas le coût des accès réalisés à travers \texttt{DoubleBuffer}.
 
-Ce résultat ne permet pas de conclure qu'une représentation SoA est systématiquement moins performante. Il indique uniquement que la variante fondée sur \texttt{ByteBuffer.allocateDirect} et \texttt{DoubleBuffer} n'apporte pas d'amélioration dans le contexte étudié.
+Ce résultat ne signifie pas qu'une représentation SoA est systématiquement moins performante. Il montre uniquement que la variante fondée sur \texttt{ByteBuffer.allocateDirect} et \texttt{DoubleBuffer} n'apporte pas d'amélioration dans le contexte testé.
 
-Une représentation SoA reposant sur un tableau \texttt{Array[Double]} plat conservé sur le tas permettrait notamment de distinguer plus clairement l'effet de la disposition mémoire de celui du stockage hors tas. Cette piste n'a pas été approfondie dans le cadre du projet.
+Une représentation SoA utilisant un tableau \texttt{Array[Double]} plat conservé sur le tas pourrait permettre de distinguer plus précisément l'effet de l'organisation des données de celui du stockage hors tas. Cette variante n'a pas été étudiée dans le cadre du projet.
 
-La représentation AoS initiale a donc été conservée pour les expériences principales.
+La représentation AoS initiale a donc été conservée.
 
 % ---------------------------------------------------------------------------
-```latex
 \section{Synthèse}
 \label{sec:eval-synthese}
+% ---------------------------------------------------------------------------
 
-Les expériences réalisées sur Covertype montrent que les versions séquentielle et distribuée de StreamKM++ produisent des résultats très proches. Pour les valeurs de \(k\) étudiées, l'écart relatif entre les deux implémentations reste inférieur à \(0.7\,\%\). Lors de la variation de la taille du coreset, l'écart maximal observé est d'environ \(0.63\,\%\).
+Les expériences réalisées sur Covertype montrent que les versions séquentielle et distribuée de StreamKM++ produisent des résultats très proches. Pour les valeurs de \(k\) étudiées, l'écart relatif entre les deux implémentations reste inférieur à \(0.7\,\%\). Lors de la variation de la taille du coreset, les différences observées restent également faibles.
 
-La comparaison avec Spark MLlib montre également que StreamKM++ obtient des SSE proches de celles d'un K-Means appliqué directement aux données distribuées. Dans les configurations testées, la réduction des observations sous la forme d'un coreset ne provoque donc pas de dégradation importante de la qualité du clustering.
+La comparaison avec Spark MLlib montre que StreamKM++ obtient des SSE proches de celles d'un K-Means appliqué directement aux données distribuées. Dans les configurations testées, l'utilisation d'un coreset permet donc de réduire les données utilisées pour déterminer les centres sans entraîner de dégradation importante de la qualité du clustering.
 
-L'étude de la taille du coreset montre par ailleurs que, dans les expériences réalisées, une augmentation de \(m\) s'accompagne d'une amélioration de la qualité du résultat, avec des gains qui deviennent plus faibles pour les tailles les plus élevées.
+L'étude de la taille du coreset montre également que, pour l'exécution réalisée, l'augmentation de \(m\) s'accompagne d'une diminution de la SSE. L'amélioration est surtout visible entre les plus petites tailles de coreset, puis devient plus limitée.
 
-Enfin, les benchmarks réalisés sur la représentation mémoire montrent que la variante SoA fondée sur un \texttt{DoubleBuffer} hors tas est moins performante que la représentation AoS initiale dans les configurations testées. La représentation initiale a donc été conservée.
+Enfin, les benchmarks réalisés sur la représentation mémoire montrent que la variante SoA fondée sur un \texttt{DoubleBuffer} hors tas est moins performante que la représentation AoS initiale dans les configurations étudiées.
 
-Dans l'ensemble, ces résultats apportent une validation expérimentale de l'implémentation et montrent que la version distribuée conserve une qualité de clustering proche de celle de la version séquentielle.
-```
+Dans l'ensemble, les résultats obtenus montrent que l'implémentation distribuée de StreamKM++ conserve une qualité de clustering proche de celle de l'implémentation séquentielle sur Covertype. Les conclusions restent néanmoins limitées par l'utilisation d'une seule exécution par configuration et pourraient être consolidées par des répétitions avec plusieurs graines.

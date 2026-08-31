@@ -1,4 +1,3 @@
-```latex
 % ch4_implementation.tex
 
 \chapter{Implémentation}
@@ -227,4 +226,4 @@ La construction locale des coresets est naturellement associée aux partitions S
 L'évaluation du coût suit la même logique distribuée : les centres sont diffusés aux partitions et les contributions locales sont agrégées pour produire la somme des erreurs quadratiques sur l'ensemble des observations.
 
 Cette architecture permet ainsi de conserver une séparation claire entre la logique algorithmique de StreamKM++ et les mécanismes de distribution propres à Spark. Les expérimentations présentées dans le chapitre suivant permettent d'évaluer la qualité des coresets obtenus ainsi que le comportement de cette implémentation lorsque la taille des données, le partitionnement et les ressources de calcul varient.
-```
+

@@ -1,4 +1,3 @@
-```latex
 % ch2_algorithmes.tex
 
 \chapter{Algorithmes}
@@ -172,4 +171,4 @@ La composition des coresets permet également de combiner des résumés construi
 Cette propriété est particulièrement adaptée à l'exécution distribuée avec Spark. Chaque partition peut construire indépendamment son propre résumé à l'aide d'un \texttt{BucketManager}. Les coresets obtenus sont ensuite fusionnés progressivement afin de produire un résumé global.
 
 La logique de StreamKM++ reste ainsi concentrée dans les packages \texttt{streamkm.core} et \texttt{streamkm.coreset}. La couche \texttt{streamkm.spark} prend en charge la distribution des traitements sans modifier le fonctionnement interne de la construction du coreset.
-```
+
