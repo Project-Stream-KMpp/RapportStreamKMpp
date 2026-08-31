@@ -1,180 +1,80 @@
+```latex
 % ch3_spark.tex
+
 \chapter{Apache Spark}
 \label{ch:spark}
 
-La thèse de référence présente d'abord le modèle d'exécution d'Apache Flink
-avant de décrire l'implémentation de StreamKM++. Nous suivons la même logique
-avec Apache Spark. Ce chapitre présente uniquement les mécanismes du framework
-qui sont mobilisés par notre solution : les RDD et DataFrames, le traitement
-par micro-batches de Structured Streaming, la diffusion de données avec
-\texttt{broadcast}, la réduction arborescente et le partitionnement.
+La thèse de référence présente le modèle d'exécution d'Apache Flink avant de détailler l'implémentation distribuée de StreamKM++. Une démarche similaire est adoptée ici avec Apache Spark. Ce chapitre se concentre uniquement sur les mécanismes utilisés dans le projet : les RDD et les DataFrames, le traitement par micro-batches avec Structured Streaming, les variables diffusées, la réduction arborescente et le partitionnement des données.
 
-L'objectif n'est pas de proposer une présentation générale de Spark, mais de
-mettre en évidence les propriétés qui influencent directement le portage de
-StreamKM++. Leur utilisation concrète dans le projet est décrite au
-chapitre~\ref{ch:implementation}.
-
+L'objectif n'est donc pas de proposer une présentation générale de Spark, mais d'identifier les mécanismes qui interviennent directement dans l'adaptation de StreamKM++. Leur mise en œuvre dans le projet est présentée au chapitre~\ref{ch:implementation}.
 
 % ---------------------------------------------------------------------------
 \section{RDD et DataFrames}
 % ---------------------------------------------------------------------------
 
-Apache Spark fournit plusieurs abstractions pour manipuler des données
-distribuées. Deux d'entre elles sont utilisées dans notre implémentation :
-les \textit{Resilient Distributed Datasets} (RDD) et les DataFrames.
+Apache Spark fournit plusieurs abstractions pour le traitement distribué des données. Deux d'entre elles sont utilisées dans l'implémentation : les \emph{Resilient Distributed Datasets} (RDD) et les DataFrames.
 
-Un RDD est une collection distribuée et partitionnée d'objets. Les opérations
-appliquées à un RDD, telles que \texttt{map}, \texttt{filter} ou
-\texttt{mapPartitions}, sont exécutées indépendamment sur ses différentes
-partitions lorsque cela est possible. Cette abstraction convient au traitement
-des objets \texttt{Point} utilisés par StreamKM++, car l'algorithme repose
-principalement sur des opérations impératives locales : calcul de distances,
-construction de coresets et mise à jour des structures merge-and-reduce.
+Un RDD est une collection de données distribuée et partitionnée. Les transformations telles que \texttt{map}, \texttt{filter} ou \texttt{mapPartitions} peuvent être appliquées indépendamment aux différentes partitions. Cette abstraction est adaptée aux objets \texttt{Point} manipulés par StreamKM++, dont le traitement repose notamment sur le calcul de distances, la construction de coresets et la mise à jour des structures de \emph{merge-and-reduce}.
 
-Les DataFrames représentent quant à eux des données distribuées organisées
-selon un schéma. Spark peut optimiser les opérations qui leur sont appliquées
-à travers son moteur d'exécution SQL, notamment lorsque les traitements
-reposent sur des expressions, des projections ou des agrégations structurées.
+Les DataFrames représentent quant à eux des données distribuées organisées selon un schéma. Ils permettent à Spark d'appliquer ses mécanismes d'optimisation aux opérations structurées telles que les projections, les filtres et les agrégations.
 
-Dans notre architecture, les DataFrames sont principalement utilisés aux
-frontières du traitement, notamment avec Structured Streaming, tandis que la
-logique algorithmique de StreamKM++ est exécutée sur des RDD de
-\texttt{Point}. Cette séparation permet de conserver les composants
-algorithmiques indépendants de Spark tout en exploitant les mécanismes de
-distribution du framework.
-
+Dans l'architecture retenue, les DataFrames sont principalement utilisés pour l'entrée des données et l'intégration avec Structured Streaming. La logique algorithmique de StreamKM++ est ensuite exécutée à partir de RDD contenant des objets \texttt{Point}. Cette séparation permet de conserver une logique algorithmique distincte des mécanismes d'orchestration propres à Spark.
 
 % ---------------------------------------------------------------------------
 \section{Traitement par micro-batches avec Structured Streaming}
 % ---------------------------------------------------------------------------
 
-Apache Spark Structured Streaming permet de traiter des flux de données à
-l'aide de la même API que les traitements distribués classiques. Dans notre
-implémentation, il est utilisé en mode \textit{micro-batch}.
+Structured Streaming permet de traiter des flux de données en s'appuyant sur les mécanismes d'exécution de Spark. Dans le cadre de ce projet, le traitement repose sur le mode \emph{micro-batch}.
 
-Le flux d'entrée est alors découpé en lots successifs. Chaque micro-batch est
-considéré comme un ensemble de données borné et peut être traité au moyen des
-opérations Spark habituelles. La méthode \texttt{foreachBatch} permet
-notamment d'appliquer une fonction spécifique à chaque lot produit par le
-moteur.
+Le flux d'entrée est découpé en lots successifs, chacun étant traité comme un ensemble de données borné. La méthode \texttt{foreachBatch} permet d'appliquer un traitement spécifique à chaque micro-batch produit par le moteur.
 
-Ce modèle diffère de celui de Flink utilisé dans la thèse, où le traitement
-est organisé autour d'opérateurs de streaming continus et d'un état maintenu
-au niveau des subtasks. Dans l'implémentation étudiée par Bitsakis, certaines
-frontières du traitement doivent notamment être détectées au moyen de
-mécanismes propres à Flink, tels que les watermarks.
+Ce fonctionnement est différent du modèle de streaming utilisé dans l'implémentation Flink étudiée par Bitsakis. Avec Structured Streaming, chaque micro-batch constitue directement une unité de traitement identifiable. Le lot peut ainsi être traité de manière distribuée avant que le résumé obtenu soit intégré à l'état maintenu par l'application.
 
-Avec Structured Streaming, la frontière entre deux micro-batches est
-explicitement fournie par le moteur d'exécution. Cette caractéristique
-simplifie certaines étapes du portage, puisqu'un lot peut être traité comme
-un ensemble borné avant que le résultat intermédiaire soit intégré à l'état
-global de l'application.
-
-Cette approche introduit toutefois une différence importante avec un
-traitement événement par événement : les observations ne sont pas
-nécessairement traitées immédiatement lors de leur arrivée, mais lors de
-l'exécution du micro-batch auquel elles appartiennent. Ce compromis est
-discuté plus en détail au chapitre~\ref{ch:discussion}.
-
+Cette approche implique toutefois que les observations sont traitées par lots et non individuellement dès leur arrivée. Le traitement dépend donc de la fréquence de déclenchement des micro-batches. Les conséquences de ce choix sont discutées au chapitre~\ref{ch:discussion}.
 
 % ---------------------------------------------------------------------------
 \section{Diffusion des centres avec \texttt{broadcast}}
 % ---------------------------------------------------------------------------
 
-Certaines opérations nécessitent qu'une même donnée soit accessible à
-l'ensemble des tâches Spark. C'est notamment le cas lors de l'évaluation de
-la qualité d'un clustering : les centres calculés doivent être utilisés par
-toutes les partitions contenant les observations originales.
+Certaines opérations nécessitent qu'une même information soit accessible aux différentes tâches Spark. C'est notamment le cas lors de l'évaluation du clustering, où les centres calculés doivent être utilisés par toutes les partitions contenant les observations.
 
-Spark fournit pour cela le mécanisme de \textit{broadcast variables}. Une
-valeur diffusée est transmise aux exécuteurs puis réutilisée localement par
-les tâches qui en ont besoin, ce qui évite de sérialiser et de transférer la
-même information à chaque opération.
+Spark fournit pour cela des variables diffusées, ou \emph{broadcast variables}. Une valeur diffusée est transmise aux exécuteurs afin d'être réutilisée localement par les tâches qui en ont besoin. Ce mécanisme évite de transférer plusieurs fois la même donnée avec chaque tâche.
 
-Dans notre projet, ce mécanisme est utilisé par
-\texttt{CostEvaluator.cost}. Les centres du clustering sont diffusés, puis
-chaque partition calcule localement sa contribution à la somme des erreurs
-quadratiques. Les résultats partiels sont ensuite agrégés afin d'obtenir le
-coût global.
+Dans l'implémentation, ce mécanisme est utilisé par \texttt{CostEvaluator.cost}. Les centres du clustering sont diffusés aux exécuteurs, puis chaque partition calcule localement sa contribution à la somme des erreurs quadratiques. Les contributions partielles sont ensuite agrégées afin d'obtenir le coût global.
 
-Cette organisation correspond au rôle joué dans la thèse par la diffusion des
-centres vers les opérateurs chargés de calculer le coût sur les données
-distribuées. L'utilisation concrète de cette opération est détaillée dans la
-section~\ref{sec:impl-evaluation}.
-
+La mise en œuvre de cette évaluation est détaillée dans la section~\ref{sec:impl-evaluation}.
 
 % ---------------------------------------------------------------------------
 \section{Réduction arborescente}
 \label{sec:spark-treereduce}
 % ---------------------------------------------------------------------------
 
-La construction distribuée de StreamKM++ produit plusieurs résumés
-intermédiaires, généralement un par partition. Ces résultats doivent ensuite
-être combinés pour former un coreset global.
+La construction distribuée de StreamKM++ produit plusieurs résumés intermédiaires, généralement un par partition. Ces résumés doivent ensuite être combinés afin de construire un coreset global.
 
-Une première approche consisterait à transférer tous les résumés vers le
-driver puis à les fusionner séquentiellement. Cette solution concentre le
-travail de réduction sur un seul processus et devient moins adaptée lorsque
-le nombre de partitions augmente.
+Une approche simple consisterait à récupérer l'ensemble des résumés sur le driver puis à effectuer les fusions séquentiellement. Cette organisation centraliserait toutefois l'ensemble du travail de réduction sur un seul processus.
 
-Spark fournit des opérations de réduction arborescente telles que
-\texttt{treeReduce} et \texttt{treeAggregate}. Au lieu d'effectuer toutes les
-combinaisons directement sur le driver, les résultats intermédiaires sont
-fusionnés progressivement à plusieurs niveaux. Une partie du travail peut
-ainsi être réalisée en parallèle avant que le résultat final ne soit renvoyé
-au driver.
+Spark fournit des opérations de réduction arborescente telles que \texttt{treeReduce} et \texttt{treeAggregate}. Les résultats intermédiaires sont alors combinés progressivement à plusieurs niveaux avant l'obtention du résultat final. La fusion peut ainsi être partiellement distribuée au lieu d'être réalisée entièrement sur le driver.
 
-Ce mécanisme est particulièrement adapté au merge-and-reduce de StreamKM++,
-car la fusion de deux résumés produit elle-même un résumé qui peut être
-fusionné à un niveau supérieur.
+Ce principe est adapté à StreamKM++, puisque deux résumés peuvent être fusionnés puis réduits afin de produire un nouveau coreset pouvant lui-même être combiné avec un autre résumé.
 
-Dans notre implémentation, \texttt{treeReduce} est utilisé pour combiner les
-structures \texttt{BucketManager} construites indépendamment sur les
-différentes partitions. Ce choix permet de conserver une graine propre à
-chaque partition lors de la construction des coresets locaux et d'éviter
-l'introduction d'un accumulateur initial partagé entre les partitions.
+Dans l'implémentation réalisée, \texttt{treeReduce} est utilisé pour fusionner les structures \texttt{BucketManager} construites sur les différentes partitions. Cette organisation permet de conserver une construction locale indépendante pour chaque partition avant la production du résumé global.
 
-L'intérêt de cette réduction arborescente est principalement architectural :
-elle évite de centraliser immédiatement toutes les opérations de fusion sur le
-driver. Son impact réel sur le temps d'exécution doit toutefois être mesuré
-expérimentalement et sera étudié dans la section consacrée à la scalabilité.
-
+La réduction arborescente permet ainsi d'éviter une centralisation immédiate de toutes les opérations de fusion. Son influence sur les performances est étudiée expérimentalement dans le chapitre consacré à l'évaluation.
 
 % ---------------------------------------------------------------------------
 \section{Partitions et ressources de calcul}
 \label{sec:spark-partitions-coeurs}
 % ---------------------------------------------------------------------------
 
-Le partitionnement constitue un élément central du modèle d'exécution Spark.
-Un RDD est divisé en plusieurs partitions, chacune pouvant être traitée
-indépendamment par une tâche.
+Le partitionnement constitue un élément central du modèle d'exécution de Spark. Un RDD est divisé en plusieurs partitions, chacune pouvant être traitée par une tâche indépendante.
 
-Dans notre cas, chaque partition construit son propre
-\texttt{BucketManager} et produit donc un résumé local des observations qui
-lui sont attribuées. Le nombre de partitions influence ainsi directement la
-structure de la construction distribuée : modifier ce nombre modifie le nombre
-de coresets intermédiaires ainsi que la manière dont ils sont ensuite
-fusionnés.
+Dans l'implémentation de StreamKM++, chaque partition construit son propre \texttt{BucketManager} et produit un résumé local des observations qu'elle contient. Le nombre de partitions détermine donc le nombre de constructions locales et influence la manière dont les différents coresets sont ensuite fusionnés.
 
-Il est important de distinguer ce paramètre du nombre de ressources de calcul
-disponibles. Le nombre de partitions définit le nombre potentiel de tâches et
-la décomposition logique des données, tandis que le nombre de c\oe{}urs
-disponibles détermine combien de ces tâches peuvent effectivement être
-exécutées simultanément.
+Le nombre de partitions doit être distingué des ressources de calcul disponibles. Le premier détermine la décomposition logique des données et le nombre de tâches susceptibles d'être exécutées, tandis que le nombre de c\oe{}urs disponibles détermine le nombre de tâches pouvant effectivement être exécutées simultanément.
 
-Les deux paramètres ne doivent donc pas être confondus. Une augmentation du
-nombre de partitions n'implique pas automatiquement une amélioration des
-performances : un partitionnement plus fin peut augmenter les possibilités de
-parallélisme, mais également introduire davantage de tâches, de sérialisation
-et d'opérations de fusion.
+Une augmentation du nombre de partitions n'entraîne donc pas nécessairement une amélioration des performances. Un partitionnement plus fin peut accroître les possibilités de parallélisme, mais également augmenter le nombre de tâches ainsi que les coûts liés à leur ordonnancement, à la sérialisation des données et aux opérations de fusion.
 
-De la même manière, le partitionnement peut influencer le coreset final,
-puisque chaque partition réalise sa propre construction locale avec une graine
-déterminée. L'effet sur la qualité du clustering n'est donc pas supposé a
-priori ; il doit être observé expérimentalement.
+Le partitionnement peut également influencer le coreset produit. Chaque partition réalise en effet une construction locale indépendante avant la fusion des résultats. Modifier le découpage des données peut ainsi conduire à des résumés intermédiaires différents et, par conséquent, à un coreset global légèrement différent.
 
-Cette séparation entre partitionnement des données et ressources de calcul
-constitue un point intéressant du portage vers Spark. Elle permet d'étudier
-séparément l'effet du découpage des données et celui du parallélisme matériel,
-ce qui sera exploité dans les expériences de scalabilité du
-chapitre~\ref{ch:evaluation}.
+Cette distinction est importante pour comprendre le comportement de l'implémentation distribuée et l'influence du partitionnement sur la construction des coresets.
+```

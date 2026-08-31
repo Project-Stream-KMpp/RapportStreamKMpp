@@ -1,222 +1,230 @@
+```latex
 % ch4_implementation.tex
+
 \chapter{Implémentation}
 \label{ch:implementation}
 
-Ce chapitre décrit la couche \texttt{streamkm.spark}, opérateur par
-opérateur, en suivant le même plan que le chapitre~4 de la thèse : d'abord
-le dataflow borné (§\ref{sec:impl-dataflow}, miroir du §4.1 de la thèse),
-puis la méthodologie d'évaluation du coût (§\ref{sec:impl-evaluation},
-miroir du §4.2), puis la variante à requêtes périodiques
-(§\ref{sec:impl-requetes}, miroir du §4.3, \emph{décrite} plutôt
-qu'implémentée --- cf. justification en fin de section), et enfin un bilan
-de ce qui se traduit ou non depuis Flink (§\ref{sec:portage-flink-spark}).
-Rappel de la règle d'or (chapitre~\ref{ch:introduction}) : aucun des
-fichiers décrits ici ne contient de logique algorithmique propre --- tout le
-calcul vient de \texttt{streamkm.core} et \texttt{streamkm.coreset}
-(chapitre~\ref{ch:algorithmes}), déjà testés indépendamment de Spark.
+Ce chapitre présente l'implémentation distribuée de StreamKM++ avec Apache Spark. La logique algorithmique décrite au chapitre~\ref{ch:algorithmes} reste indépendante de Spark et est regroupée dans les packages \texttt{streamkm.core} et \texttt{streamkm.coreset}. La couche \texttt{streamkm.spark} prend en charge la distribution des données, la construction des coresets locaux, leur fusion et l'évaluation du clustering obtenu.
 
-\section{StreamKM++ distribué, flux borné}
+L'implémentation repose sur deux niveaux de traitement. Chaque partition construit d'abord un résumé local des données qui lui sont attribuées. Ces résumés sont ensuite fusionnés afin d'obtenir un coreset global sur lequel le clustering final est calculé. Structured Streaming reprend ce même principe pour traiter successivement plusieurs micro-batches.
+
+% ---------------------------------------------------------------------------
+\section{Construction distribuée du coreset}
 \label{sec:impl-dataflow}
+% ---------------------------------------------------------------------------
 
-\subsection{Coresets partiels par partition}
+\subsection{Construction d'un coreset par partition}
 
-\texttt{StreamKMPlusPlus.partialCoresets} porte l'opérateur
-\texttt{FlatMapToPartialCoresets} de la thèse (§4.1) : chaque subtask Flink
-« consomme les points d'entrée selon l'algorithme 2.5 » --- une partition
-Spark joue exactement ce rôle.
+La première étape consiste à répartir la construction du coreset entre les partitions du RDD. La méthode \texttt{StreamKMPlusPlus.partialCoresets} utilise \texttt{mapPartitionsWithIndex} afin que chaque partition construise indépendamment son propre résumé.
 
 \begin{verbatim}
-def partialCoresets(rdd: RDD[Point], p: StreamKMParams): RDD[Array[Point]] =
+def partialCoresets(
+    rdd: RDD[Point],
+    p: StreamKMParams
+): RDD[Array[Point]] = {
+
   rdd.mapPartitionsWithIndex { (idx, it) =>
     val bm = new BucketManager(p.m, p.seed + idx)
     bm.insertAll(it)
     Iterator.single(bm.extractCoreset())
   }
-\end{verbatim}
-
-La graine de chaque \texttt{BucketManager} est dérivée de l'indice de
-partition (\texttt{p.seed + idx}) plutôt que partagée entre partitions ---
-condition nécessaire pour que l'expérience de sensibilité au nombre de
-partitions (chapitre~\ref{ch:evaluation}) reste interprétable : avec une graine
-partagée, changer le nombre de partitions changerait aussi la suite
-aléatoire consommée par chaque partition, confondant l'effet mesuré (le
-partitionnement) avec un simple changement de graine.
-
-\subsection{Fusion arborescente du coreset final}
-
-\texttt{StreamKMPlusPlus.mergeCoresets} remplace l'opérateur
-\texttt{FlatMapToFinalCoreset} de la thèse --- l'opérateur \textbf{non
-parallèle} par construction (§4.1 : fusion séquentielle, un coreset partiel
-à la fois) que la thèse elle-même identifie comme le goulot qui plafonne le
-speedup au-delà de 8 c\oe{}urs (§5.3.1). C'est notre apport principal par
-rapport à la thèse, rendu possible par le découplage partitions/c\oe{}urs de
-Spark (§\ref{sec:spark-treereduce}) :
-
-\begin{verbatim}
-def mergeCoresets(rdd: RDD[Point], p: StreamKMParams, depth: Int = 2): Array[Point] = {
-  val perPartition: RDD[BucketManager] = rdd.mapPartitionsWithIndex { (idx, it) =>
-    val bm = new BucketManager(p.m, p.seed + idx)
-    bm.insertAll(it)
-    Iterator.single(bm)
-  }
-  perPartition.treeReduce((a, b) => a.merge(b), depth).extractCoreset()
 }
 \end{verbatim}
 
-Le \texttt{combOp} de ce \texttt{treeReduce} est \texttt{BucketManager.merge}
-(chapitre~\ref{ch:algorithmes}, §\ref{sec:algo-merge-reduce}), réutilisé
-\emph{tel quel} --- aucune extension de \texttt{streamkm.coreset} n'a été
-nécessaire pour distribuer merge-and-reduce sur un cluster, ce qui confirme
-a posteriori la séparation stricte des couches annoncée en introduction.
+Chaque partition instancie un \texttt{BucketManager}, lui transmet les observations qu'elle contient puis extrait le coreset obtenu. La graine utilisée est dérivée de l'indice de la partition afin de disposer d'une construction locale reproductible pour un partitionnement donné.
 
-\subsection{Boucle Structured Streaming complète}
+Cette organisation correspond naturellement au modèle distribué de Spark. Les partitions peuvent être traitées indépendamment avant la phase de fusion, ce qui évite de centraliser la construction du coreset sur le driver.
 
-\texttt{StreamKMPlusPlus.run} assemble l'ensemble du dataflow --- de
-l'équivalent de \texttt{HdfsSource} jusqu'à l'équivalent de
-\texttt{FlatMapToKmeansPP} --- autour d'un état global unique
-(\texttt{BucketManager}) maintenu côté \emph{driver} entre les micro-batches :
+\subsection{Fusion des résumés locaux}
+
+Les coresets construits sur les différentes partitions doivent ensuite être combinés afin de produire un résumé global. La méthode \texttt{mergeCoresets} applique pour cela une réduction arborescente.
 
 \begin{verbatim}
-def run(source: DataFrame, p: StreamKMParams,
-        onModel: KMeansModel => Unit,
-        featuresCol: String = "features"): StreamingQuery = {
+def mergeCoresets(
+    rdd: RDD[Point],
+    p: StreamKMParams,
+    depth: Int = 2
+): Array[Point] = {
+
+  val perPartition: RDD[BucketManager] =
+    rdd.mapPartitionsWithIndex { (idx, it) =>
+      val bm = new BucketManager(p.m, p.seed + idx)
+      bm.insertAll(it)
+      Iterator.single(bm)
+    }
+
+  perPartition
+    .treeReduce((a, b) => a.merge(b), depth)
+    .extractCoreset()
+}
+\end{verbatim}
+
+Chaque partition produit ici un \texttt{BucketManager} contenant son résumé local. Les structures obtenues sont ensuite combinées à l'aide de \texttt{treeReduce}. L'opération de fusion repose directement sur la méthode \texttt{BucketManager.merge}, déjà utilisée par la stratégie \emph{merge-and-reduce} décrite au chapitre~\ref{ch:algorithmes}.
+
+Cette approche permet de réutiliser la même logique de fusion indépendamment du niveau auquel elle est appliquée. La couche Spark organise ainsi l'exécution distribuée sans modifier les mécanismes internes de construction du coreset.
+
+Par rapport à une récupération de l'ensemble des résumés sur le driver suivie d'une fusion séquentielle, la réduction arborescente répartit une partie des opérations de combinaison entre plusieurs niveaux.
+
+% ---------------------------------------------------------------------------
+\section{Traitement avec Structured Streaming}
+% ---------------------------------------------------------------------------
+
+La méthode \texttt{StreamKMPlusPlus.run} étend la construction distribuée au traitement d'un flux avec Structured Streaming. Un \texttt{BucketManager} global est maintenu sur le driver afin de conserver un résumé des micro-batches déjà traités.
+
+\begin{verbatim}
+def run(
+    source: DataFrame,
+    p: StreamKMParams,
+    onModel: KMeansModel => Unit,
+    featuresCol: String = "features"
+): StreamingQuery = {
 
   val global = new BucketManager(p.m, p.seed)
 
   source.writeStream.foreachBatch { (batch, batchId) =>
-    val points = batch.rdd.map(row => Point(row.getAs[Seq[Double]](featuresCol).toArray))
-    val partial = mergeCoresets(points, p.copy(seed = p.seed + batchId))
+
+    val points = batch.rdd.map { row =>
+      Point(
+        row.getAs[Seq[Double]](featuresCol).toArray
+      )
+    }
+
+    val partial =
+      mergeCoresets(
+        points,
+        p.copy(seed = p.seed + batchId)
+      )
+
     partial.foreach(global.insert)
-    val model = KMeans.fit(global.extractCoreset(), p.k, p.nRestarts, seed = p.seed)
+
+    val model =
+      KMeans.fit(
+        global.extractCoreset(),
+        p.k,
+        p.nRestarts,
+        seed = p.seed
+      )
+
     onModel(model)
+
   }.start()
 }
 \end{verbatim}
 
-Chaque micro-batch produit son propre coreset distribué (\texttt{mergeCoresets}),
-qui est ensuite intégré dans l'état global par \texttt{insert} --- exactement
-la même opération de fusion que \texttt{FlatMapToFinalCoreset}, appliquée
-cette fois entre micro-batches plutôt qu'entre partitions. Le contrat
-d'entrée (une colonne \texttt{featuresCol} de type \texttt{array<double>},
-poids implicite $1.0$) reflète directement \texttt{Point.scala}
-(chapitre~\ref{ch:algorithmes}) : le poids n'existe que dans les coresets
-produits en interne, jamais dans les données brutes du flux.
+Chaque micro-batch est d'abord converti en RDD de \texttt{Point}. Un coreset est ensuite construit de manière distribuée à partir des partitions du lot. Le résumé obtenu est intégré au \texttt{BucketManager} global, qui représente progressivement l'ensemble des observations déjà traitées.
 
-\subsection{Table de correspondance}
+Le clustering est calculé à partir du coreset courant après l'intégration du micro-batch. La méthode \texttt{onModel} permet ensuite d'exploiter le modèle produit sans imposer un mécanisme de sortie particulier.
 
-\begin{table}[h]
+Les observations brutes sont considérées comme ayant un poids unitaire. Les poids supérieurs à un apparaissent uniquement lors de la construction des coresets et correspondent à la masse représentée par chaque point du résumé.
+
+% ---------------------------------------------------------------------------
+\section{Correspondance avec l'implémentation Flink}
+% ---------------------------------------------------------------------------
+
+L'implémentation Spark conserve les principales étapes de l'approche distribuée proposée avec Flink par Bitsakis \cite{bitsakis2018}, mais leur réalisation est adaptée au modèle d'exécution de Spark.
+
+\begin{table}[ht]
 \centering
 \small
-\begin{tabular}{p{3.6cm}p{4.6cm}p{4.6cm}}
+\begin{tabular}{p{3.5cm}p{4.5cm}p{4.8cm}}
 \toprule
-\textbf{Opérateur Flink (thèse)} & \textbf{Rôle} & \textbf{Équivalent Spark} \\
+\textbf{Opérateur Flink} &
+\textbf{Rôle} &
+\textbf{Implémentation Spark} \\
 \midrule
-\texttt{HdfsSource} & lecture parallèle des lignes & source fichier partitionnée \\
-\texttt{HandleWatermark} & détecter la fin de fichier & \textbf{aucun} --- \texttt{foreachBatch} rend la frontière explicite \\
-\texttt{FlatMapToPoint} & parsing \texttt{String} $\to$ \texttt{Point} & \texttt{mapPartitions} + \texttt{filter} \\
-\texttt{FlatMapToPartialCoresets} & merge-and-reduce par subtask & \texttt{partialCoresets} \\
-\texttt{FlatMapToFinalCoreset} & fusion séquentielle (par. 1) & \texttt{mergeCoresets} (\texttt{treeReduce}) \\
-\texttt{FlatMapToKmeansPP} & 5$\times$ $k$-means++ (par. 1) & \texttt{KMeans.fit} sur le driver \\
-\texttt{HdfsSink} & écriture des centres & sink (fichier ou \texttt{onModel}) \\
+
+\texttt{HdfsSource} &
+Lecture distribuée des données &
+Source Spark partitionnée \\
+
+\texttt{HandleWatermark} &
+Identification d'une frontière de traitement &
+Frontière fournie par les micro-batches de Structured Streaming \\
+
+\texttt{FlatMapToPoint} &
+Conversion des données en points &
+Transformation en objets \texttt{Point} \\
+
+\texttt{FlatMapToPartialCoresets} &
+Construction locale du coreset &
+\texttt{mapPartitionsWithIndex} \\
+
+\texttt{FlatMapToFinalCoreset} &
+Fusion des coresets partiels &
+\texttt{treeReduce} et \texttt{BucketManager.merge} \\
+
+\texttt{FlatMapToKmeansPP} &
+Calcul du clustering final &
+\texttt{KMeans.fit} sur le coreset global \\
+
+\texttt{HdfsSink} &
+Production des centres &
+Fonction de sortie \texttt{onModel} \\
+
 \bottomrule
 \end{tabular}
-\caption{Correspondance des opérateurs, dataflow borné (§4.1 de la thèse).}
+\caption{Correspondance entre les principales étapes des implémentations Flink et Spark.}
+\label{tab:flink-spark}
 \end{table}
 
-\section{Méthodologie d'évaluation du coût}
-\label{sec:impl-evaluation}
+La principale différence concerne la fusion des résumés intermédiaires. Dans l'implémentation Spark, les coresets locaux peuvent être combinés au moyen d'une réduction arborescente. Le découpage en micro-batches fournit également une frontière explicite entre les différents lots traités.
 
-La thèse (§4.2) recalcule le coût d'un clustering en parallèle, à partir
-d'un fichier de centres déjà connu, dans un job Flink séparé --- nécessaire
-pour mesurer la qualité sur de gros volumes sans que ce calcul devienne
-lui-même le goulot d'étranglement des expériences du chapitre~5. Elle utilise
-pour cela un \emph{connected stream} (deux sources fusionnées : les points
-et les centres), un opérateur de diffusion et un opérateur de somme partielle.
-Cette machinerie tient, côté Spark, en trois lignes :
+% ---------------------------------------------------------------------------
+\section{Évaluation distribuée du coût}
+\label{sec:impl-evaluation}
+% ---------------------------------------------------------------------------
+
+La qualité du clustering doit être évaluée sur l'ensemble des données originales et non uniquement sur le coreset. Le coût utilisé dans les expériences correspond à la somme des distances euclidiennes au carré entre chaque observation et son centre le plus proche.
+
+Cette opération est réalisée de manière distribuée par la méthode \texttt{CostEvaluator.cost} :
 
 \begin{verbatim}
-def cost(points: RDD[Point], centers: Array[Array[Double]], depth: Int = 2): Double = {
-  val bcCenters = points.sparkContext.broadcast(centers)
+def cost(
+    points: RDD[Point],
+    centers: Array[Array[Double]],
+    depth: Int = 2
+): Double = {
+
+  val bcCenters =
+    points.sparkContext.broadcast(centers)
+
   points
-    .mapPartitions(it => Iterator.single(KMeans.cost(it.toArray, bcCenters.value)))
+    .mapPartitions { it =>
+      Iterator.single(
+        KMeans.cost(
+          it.toArray,
+          bcCenters.value
+        )
+      )
+    }
     .treeReduce(_ + _, depth)
 }
 \end{verbatim}
 
-\texttt{sc.broadcast(centers)} remplace \texttt{FlatMapToCentroid} +
-\texttt{.broadcast()} ; \texttt{mapPartitions(... KMeans.cost ...)} remplace
-\texttt{CoFlatMapToPartialCost} ; \texttt{treeReduce(\_+\_)} remplace
-\texttt{CoFlatMapToFinalCost}. Contrairement à la fusion de coresets
-(§\ref{sec:impl-dataflow}), cette agrégation est une simple somme ---
-associative et exacte à la précision flottante près --- ce qui explique
-pourquoi elle ne nécessite aucune des précautions de reproductibilité par
-partition discutées plus haut : le résultat ne dépend pas du nombre de
-partitions choisi. C'est cet instrument qui sert de mesure à
-\textbf{toutes} les expériences du chapitre~\ref{ch:evaluation} --- jamais
-le coût mesuré sur le coreset lui-même, qui n'est pas comparable au coût sur
-les données complètes.
+Les centres sont d'abord diffusés aux exécuteurs à l'aide d'une variable \texttt{broadcast}. Chaque partition calcule ensuite localement la contribution de ses observations au coût total. Les coûts partiels sont enfin additionnés à l'aide de \texttt{treeReduce}.
 
-\section{Variante à requêtes périodiques (décrite, non implémentée)}
-\label{sec:impl-requetes}
+Cette méthode évite de rapatrier les observations sur le driver pour effectuer l'évaluation. Elle est utilisée dans les expériences du chapitre~\ref{ch:evaluation} afin de comparer les différentes configurations sur la même métrique et sur l'ensemble du jeu de données.
 
-Le §4.3 de la thèse propose une variante où le clustering est ré-évalué
-périodiquement plutôt qu'une seule fois à la fin du flux, et où plusieurs
-valeurs de $k$ sont calculées simultanément. Faute de temps avant la
-deadline, cette variante \textbf{n'a pas été implémentée} --- conformément à
-notre méthodologie de travail, qui préférait explicitement documenter cette
-limite plutôt que de livrer une implémentation bâclée. La thèse elle-même ne
-l'évalue pas expérimentalement (elle le signale comme travail futur, ch.~6),
-ce qui rend ce choix d'autant plus défendable.
+% ---------------------------------------------------------------------------
+\section{Périmètre de l'implémentation}
+% ---------------------------------------------------------------------------
 
-Le portage resterait néanmoins direct avec ce que nous avons déjà construit :
-le \emph{trigger} de Structured Streaming remplacerait directement
-l'opérateur \texttt{SourceRequests\_R} de génération de requêtes périodiques
-(\texttt{Trigger.ProcessingTime("30 seconds")} au lieu d'un flux de requêtes
-explicite) ; \texttt{BucketManager.extractCoreset} --- qui ne vide jamais
-l'état, une propriété déjà exploitée par \texttt{run} --- permettrait de
-dupliquer le coreset courant pour plusieurs valeurs de $k$ simultanément
-(\texttt{Seq(25, 50, 75).map(k => KMeans.fit(coreset, k))}), remplaçant
-\texttt{FlatMapToFinalCoreset\_R}. Seule la persistance du meilleur
-clustering \emph{par} $k$ (\texttt{ValueState} chez Flink) demanderait une
-structure nouvelle côté Spark (une simple \texttt{Map[Int, KMeansModel]}
-tenue par le \texttt{onModel} de \texttt{run} suffirait).
+La thèse de Bitsakis décrit également une variante permettant de produire périodiquement plusieurs clusterings pour différentes valeurs de \(k\), ainsi qu'un mécanisme d'interrogation de l'état du traitement.
 
-Le §4.3.1 de la thèse (\emph{Queryable State}, interrogation en temps réel de
-l'état interne depuis l'extérieur du job) \textbf{n'a en revanche pas
-d'équivalent Spark} : Spark n'expose aucun état inter-micro-batch
-interrogeable depuis l'extérieur. C'est un avantage architectural réel de
-Flink, que nous assumons comme tel --- voir la discussion du
-chapitre~\ref{ch:discussion}. Le contournement usuel (un sink \texttt{memory}
-interrogé par \texttt{spark.sql("SELECT * FROM centers")}, ou l'écriture des
-centres dans un store externe) n'offre pas la même garantie de fraîcheur
-immédiate.
+Ces fonctionnalités n'ont pas été retenues dans le périmètre de l'implémentation réalisée. Le travail se concentre sur la construction distribuée de StreamKM++, son adaptation à Structured Streaming et l'évaluation expérimentale de la qualité et des performances du portage vers Spark.
 
-\section{Ce qui se traduit depuis Flink, ce qui ne se traduit pas}
+Structured Streaming permet néanmoins de recalculer un modèle après chaque micro-batch à partir du coreset courant, comme le montre la méthode \texttt{run}. Cette fonctionnalité fournit le mécanisme nécessaire à la production progressive de résultats sans ajouter de gestion spécifique de requêtes périodiques.
+
+% ---------------------------------------------------------------------------
+\section{Synthèse du portage de Flink vers Spark}
 \label{sec:portage-flink-spark}
+% ---------------------------------------------------------------------------
 
-Ce paragraphe de synthèse répond directement à la question posée par
-l'énoncé --- porter en Spark une solution Flink --- et n'a pas
-d'équivalent dans la thèse : c'est notre contribution propre.
+Le portage vers Spark conserve les principes algorithmiques de l'implémentation distribuée de StreamKM++, tout en adaptant leur orchestration au modèle d'exécution du framework.
 
-\begin{itemize}
-  \item \textbf{Disparaît entièrement} : \texttt{HandleWatermark}. Le
-    bricolage watermark/marqueur « EOF » de la thèse n'a plus de raison
-    d'être --- \texttt{foreachBatch} rend la frontière de micro-batch
-    explicite par construction (§\ref{ch:spark}).
-  \item \textbf{Se traduit avec un gain net} : la fusion des coresets
-    partiels. L'opérateur non-parallèle de la thèse (\S\ref{sec:impl-dataflow})
-    devient une réduction en arbre (\texttt{treeReduce}), ce qui repousse
-    directement le plafond de speedup identifié au §5.3.1 de la thèse ---
-    à confirmer expérimentalement (chapitre~\ref{ch:evaluation}).
-  \item \textbf{Se traduit à l'identique, en plus concis} : la méthodologie
-    d'évaluation du coût (§\ref{sec:impl-evaluation}) --- trois opérateurs
-    Flink dédiés et un \emph{connected stream} deviennent trois lignes de
-    \texttt{broadcast} + \texttt{treeReduce}.
-  \item \textbf{Se traduit, avec un degré de liberté nouveau} : le
-    parallélisme. Le couplage partitions/c\oe{}urs de Flink se découple côté
-    Spark (§\ref{sec:spark-partitions-coeurs}), ce qui permet une expérience de
-    sensibilité au nombre de partitions que le modèle de Flink ne permet pas.
-  \item \textbf{Ne se traduit pas} : Queryable State
-    (§\ref{sec:impl-requetes}). C'est la seule perte de fonctionnalité nette
-    identifiée dans ce portage --- discutée au chapitre~\ref{ch:discussion}.
-\end{itemize}
+La construction locale des coresets est naturellement associée aux partitions Spark. Les résumés produits peuvent ensuite être combinés à l'aide de \texttt{treeReduce}, en réutilisant directement les opérations de fusion définies dans \texttt{BucketManager}. Structured Streaming permet quant à lui de traiter successivement les différents micro-batches et de maintenir un coreset représentant les données déjà consommées.
+
+L'évaluation du coût suit la même logique distribuée : les centres sont diffusés aux partitions et les contributions locales sont agrégées pour produire la somme des erreurs quadratiques sur l'ensemble des observations.
+
+Cette architecture permet ainsi de conserver une séparation claire entre la logique algorithmique de StreamKM++ et les mécanismes de distribution propres à Spark. Les expérimentations présentées dans le chapitre suivant permettent d'évaluer la qualité des coresets obtenus ainsi que le comportement de cette implémentation lorsque la taille des données, le partitionnement et les ressources de calcul varient.
+```

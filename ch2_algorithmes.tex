@@ -1,47 +1,34 @@
+```latex
 % ch2_algorithmes.tex
+
 \chapter{Algorithmes}
 \label{ch:algorithmes}
 
-StreamKM++ est un algorithme de clustering conçu pour traiter des flux de données
-dont la taille peut être trop importante pour permettre la conservation de l'ensemble
-des observations en mémoire. Son principe consiste à maintenir progressivement un
-\textit{coreset}, c'est-à-dire un résumé pondéré et de taille limitée du flux déjà observé.
-Le clustering final est ensuite calculé sur ce résumé plutôt que sur l'ensemble complet
-des données.
+StreamKM++ est un algorithme de clustering conçu pour traiter des flux de données dont la taille peut rendre impossible la conservation de l'ensemble des observations en mémoire. Son principe consiste à construire progressivement un \emph{coreset}, c'est-à-dire un résumé pondéré et de taille limitée des données déjà observées. Le clustering final est ensuite effectué sur ce résumé plutôt que sur l'ensemble du flux \cite{ackermann2012}.
 
-L'approche repose sur quatre composants principaux : une version pondérée de
-l'algorithme de Lloyd, l'initialisation k-means++, la construction d'un coreset à l'aide
-d'un arbre de partitionnement, puis une stratégie \textit{merge-and-reduce} permettant
-de maintenir ce résumé au cours du flux. Ces composants sont décrits dans les sections
-suivantes, en distinguant la formulation algorithmique issue de la littérature des choix
-effectués dans notre implémentation lorsque cela est nécessaire.
-
+L'approche repose sur plusieurs composants complémentaires : une version pondérée de l'algorithme de Lloyd, l'initialisation k-means++, la construction d'un coreset à l'aide d'un arbre de partitionnement et une stratégie \emph{merge-and-reduce} permettant de maintenir ce résumé au fur et à mesure de l'arrivée des données. Ces composants sont présentés dans les sections suivantes, en précisant les choix effectués dans l'implémentation lorsqu'ils diffèrent de la formulation de référence.
 
 % ---------------------------------------------------------------------------
 \section{Algorithme de Lloyd pondéré}
 % ---------------------------------------------------------------------------
 
-L'algorithme de Lloyd constitue l'étape d'optimisation utilisée par k-means. À partir
-d'un ensemble de centres initiaux, il alterne deux opérations jusqu'à convergence :
-chaque point est d'abord affecté au centre le plus proche, puis chaque centre est
-recalculé comme la moyenne des points qui lui sont associés.
+L'algorithme de Lloyd constitue l'étape d'optimisation utilisée par k-means. À partir d'un ensemble de centres initiaux, il alterne deux opérations jusqu'à convergence. Chaque point est d'abord affecté au centre le plus proche, puis chaque centre est recalculé à partir des points qui lui sont associés.
 
-Dans StreamKM++, cette opération est réalisée sur un coreset et non directement sur
-les observations originales. Les représentants du coreset possèdent donc un poids
-indiquant la masse de données qu'ils représentent. L'algorithme de Lloyd doit par
-conséquent prendre ces poids en compte lors du recalcul des centres.
+Dans StreamKM++, cette opération est appliquée au coreset plutôt qu'aux observations originales. Les représentants du coreset possèdent un poids correspondant à la quantité de données qu'ils représentent. Ces poids doivent donc être pris en compte lors du recalcul des centres.
 
 Soit un ensemble de points pondérés
+
 \[
 P = \{(p_i,w_i)\}_{i=1}^{n}
 \]
+
 et un ensemble de centres
+
 \[
 C = \{c_1,\ldots,c_k\}.
 \]
 
-Après l'affectation de chaque point à son centre le plus proche, le centre du cluster
-$j$ est recalculé selon :
+Après l'affectation de chaque point à son centre le plus proche, le centre du cluster \(j\) est recalculé selon :
 
 \[
 c_j =
@@ -52,8 +39,7 @@ c_j =
 }.
 \]
 
-La qualité du clustering est évaluée à l'aide de la somme pondérée des distances
-euclidiennes au carré :
+La qualité du clustering est évaluée à l'aide de la somme pondérée des distances euclidiennes au carré :
 
 \[
 \mathrm{cost}(P,C)
@@ -64,33 +50,19 @@ w_i
 \|p_i-c\|^2.
 \]
 
-Cette pondération est essentielle. Un représentant de poids $w$ doit avoir le même
-effet sur le calcul des centres que $w$ observations identiques de poids unitaire.
-Ignorer les poids reviendrait à donner la même importance à deux représentants pouvant
-pourtant résumer des nombres très différents d'observations.
+La pondération permet à un représentant de poids \(w\) d'avoir le même effet sur le calcul des centres que \(w\) observations identiques de poids unitaire. Elle est donc indispensable lorsqu'un point du coreset représente plusieurs observations du jeu de données initial.
 
-Dans notre implémentation, cette propriété est vérifiée explicitement par les tests
-unitaires. L'algorithme conserve également le centre précédent lorsqu'un cluster devient
-vide au cours d'une itération. Ce choix évite d'introduire une réinitialisation
-supplémentaire susceptible de perturber la convergence.
-
-L'itération s'arrête lorsque l'amélioration relative du coût devient inférieure à un
-seuil donné ou lorsque le nombre maximal d'itérations est atteint.
-
+Dans l'implémentation réalisée, cette propriété est vérifiée par des tests unitaires. Lorsqu'un cluster devient vide au cours d'une itération, son centre précédent est conservé afin d'éviter une réinitialisation supplémentaire. L'algorithme s'arrête lorsque l'amélioration relative du coût devient inférieure à un seuil fixé ou lorsque le nombre maximal d'itérations est atteint.
 
 % ---------------------------------------------------------------------------
 \section{Initialisation k-means++}
 % ---------------------------------------------------------------------------
 
-L'algorithme de Lloyd est sensible aux centres utilisés lors de son initialisation.
-Une sélection purement aléatoire peut conduire à des centres initiaux concentrés dans
-une même région des données et, par conséquent, à un minimum local de mauvaise qualité.
+L'algorithme de Lloyd est sensible au choix des centres initiaux. Une sélection entièrement aléatoire peut conduire à des centres concentrés dans une même région des données et ainsi dégrader la qualité du résultat obtenu.
 
-L'initialisation k-means++ vise à répartir davantage les centres initiaux. Après le
-choix d'un premier centre, chaque nouveau centre est sélectionné avec une probabilité
-proportionnelle au carré de sa distance au centre déjà choisi le plus proche.
+L'initialisation k-means++ proposée par Arthur et Vassilvitskii \cite{arthur2007} cherche à mieux répartir les centres initiaux. Après la sélection d'un premier centre, chaque nouveau centre est choisi avec une probabilité proportionnelle au carré de sa distance au centre déjà sélectionné le plus proche.
 
-Pour un point $p$, on définit :
+Pour un point \(p\), on définit :
 
 \[
 D(p)^2 =
@@ -98,178 +70,106 @@ D(p)^2 =
 \|p-c\|^2.
 \]
 
-Dans le cas pondéré utilisé par StreamKM++, la probabilité de sélectionner un point
-$p_i$ comme nouveau centre est proportionnelle à :
+Dans le cas pondéré utilisé avec le coreset, la probabilité de sélectionner un point \(p_i\) comme nouveau centre est proportionnelle à :
 
 \[
 w_i D(p_i)^2.
 \]
 
-Les représentants ayant une masse importante et étant éloignés des centres déjà
-sélectionnés ont ainsi davantage de chances d'être choisis.
+Ainsi, les représentants ayant un poids important et situés loin des centres déjà sélectionnés ont une probabilité plus élevée d'être choisis.
 
 \paragraph{Choix du premier centre.}
 
-La formulation classique de k-means++ sélectionne le premier centre uniformément parmi
-les observations. Dans notre implémentation, lorsque l'algorithme est appliqué à un
-ensemble pondéré, le premier centre est tiré proportionnellement au poids du point.
+Dans la formulation classique de k-means++, le premier centre est sélectionné uniformément parmi les observations \cite{arthur2007}. Dans l'implémentation réalisée, lorsque les données sont pondérées, ce premier centre est choisi avec une probabilité proportionnelle au poids du point. Les deux approches sont équivalentes lorsque tous les poids valent \(1\). Dans le cas d'un coreset, ce choix permet de prendre en compte dès l'initialisation la masse de données représentée par chaque point.
 
-Les deux stratégies sont équivalentes lorsque tous les poids valent $1$. Dans le cas
-d'un coreset, les poids peuvent en revanche être très différents. Le choix retenu permet
-donc de tenir compte dès la première sélection de la quantité de données représentée
-par chaque point du résumé. Il s'agit d'un choix d'implémentation par rapport à la
-formulation utilisée dans la thèse de référence.
-
-Pour limiter la sensibilité à l'initialisation, l'ensemble du processus
-k-means++ suivi de Lloyd est exécuté plusieurs fois avec des initialisations différentes.
-Le modèle présentant le coût final le plus faible est ensuite conservé. Dans nos
-expériences, cinq redémarrages sont utilisés sauf indication contraire.
-
+Afin de limiter la sensibilité du résultat à l'initialisation, le processus composé de k-means++ puis de l'algorithme de Lloyd est exécuté plusieurs fois. Le modèle présentant le coût final le plus faible est conservé. Dans les expériences réalisées, cinq exécutions sont utilisées sauf indication contraire.
 
 % ---------------------------------------------------------------------------
 \section{Construction du coreset}
 % ---------------------------------------------------------------------------
 
-Le principal objectif de StreamKM++ est d'éviter de conserver l'ensemble du flux tout
-en maintenant suffisamment d'information pour produire un clustering de qualité. Cette
-réduction est réalisée au moyen d'un coreset.
+L'objectif principal de StreamKM++ est de réduire la quantité de données conservée tout en maintenant suffisamment d'information pour obtenir un clustering représentatif. Cette réduction repose sur la construction d'un coreset \cite{ackermann2012}.
 
-Un coreset peut être vu comme un ensemble pondéré plus petit qui résume les principales
-caractéristiques géométriques des données originales. Chaque représentant est associé
-à un poids correspondant à la masse des observations qu'il représente.
+Un coreset est un ensemble pondéré de taille réduite représentant les principales caractéristiques des données originales. Chaque point du coreset est associé à un poids correspondant à la masse des observations qu'il résume.
 
-La méthode utilisée dans StreamKM++ construit ce résumé à l'aide d'un
-\textit{coreset tree}. L'idée générale consiste à organiser progressivement les données
-dans un arbre binaire. Chaque feuille représente un sous-ensemble des observations et
-possède un point représentatif.
+Dans StreamKM++, ce résumé est construit à l'aide d'un \emph{coreset tree}. Les données sont organisées progressivement dans un arbre binaire dont chaque feuille correspond à un sous-ensemble des observations et possède un représentant.
 
-Au départ, une seule feuille contient l'ensemble des points considérés. À chaque étape,
-une feuille est choisie pour être raffinée. La probabilité de sélectionner une branche
-dépend du coût associé aux points qu'elle contient : une région mal représentée par son
-représentant possède un coût plus élevé et a donc davantage de chances d'être divisée.
+Initialement, une seule feuille contient l'ensemble des points à résumer. À chaque étape, une feuille est sélectionnée pour être subdivisée. La probabilité de sélection dépend de son coût : une région dont les données sont mal représentées possède un coût plus important et est donc davantage susceptible d'être raffinée.
 
-Une fois la feuille sélectionnée, un nouveau représentant est choisi à l'aide d'un
-échantillonnage basé sur la distance au représentant courant. Les observations sont
-ensuite réparties entre les deux représentants selon leur proximité. Ce processus est
-répété jusqu'à atteindre la taille de coreset souhaitée ou jusqu'à ce qu'aucune
-subdivision supplémentaire ne soit possible.
+Une fois la feuille sélectionnée, un nouveau représentant est choisi à partir des distances au représentant existant. Les observations sont ensuite réparties entre les deux représentants selon leur proximité. Ce processus est répété jusqu'à atteindre la taille cible du coreset ou jusqu'à ce qu'aucune subdivision supplémentaire ne soit possible.
 
 \paragraph{Coût et masse.}
 
-Deux notions doivent être distinguées dans la construction de l'arbre.
+Deux grandeurs doivent être distinguées lors de la construction de l'arbre. Le coût d'un nœud est calculé à partir des distances entre les observations qu'il contient et son représentant. Il intervient dans le choix des régions à subdiviser.
 
-La première est le \textbf{coût} d'un nœud, défini à partir des distances entre ses
-observations et son représentant. Cette valeur est utilisée pour décider quelles régions
-de l'arbre doivent être raffinées.
+La masse d'un nœud correspond quant à elle à la somme des poids des observations qu'il représente. Elle devient le poids du représentant lorsque celui-ci est intégré au coreset.
 
-La seconde est la \textbf{masse} du nœud, correspondant à la somme des poids des
-observations qu'il représente. Cette masse devient le poids du représentant lorsqu'il
-est finalement placé dans le coreset.
-
-Dans notre implémentation, ces deux grandeurs sont représentées séparément afin
-d'éviter toute ambiguïté. Le coût intervient dans la sélection des branches à subdiviser,
-tandis que la masse est utilisée pour pondérer les représentants du coreset.
+Dans l'implémentation réalisée, le coût et la masse sont donc représentés séparément. Le premier intervient dans la construction de l'arbre, tandis que la seconde est utilisée pour pondérer les représentants produits.
 
 \paragraph{Conservation de la masse.}
 
-Une propriété essentielle de la construction est la conservation de la masse totale.
-Si le jeu d'entrée représente une masse totale
+La construction du coreset doit préserver la masse totale des données. Si l'ensemble d'entrée possède une masse
 
 \[
 W =
 \sum_i w_i,
 \]
 
-alors le coreset obtenu doit vérifier :
+alors le coreset \(S\) doit vérifier :
 
 \[
 \sum_{q \in S} w_q = W.
 \]
 
-Autrement dit, la réduction du nombre de représentants ne doit pas entraîner de perte
-d'information sur la quantité totale de données représentée. Cette propriété constitue
-l'un des invariants vérifiés dans les tests de notre implémentation.
+La réduction du nombre de représentants ne modifie donc pas la quantité totale de données représentée. Cette propriété constitue l'un des invariants vérifiés par les tests de l'implémentation.
 
 \paragraph{Cas dégénérés.}
 
-La taille $m$ constitue une taille cible maximale. Dans le cas général, la construction
-cherche à produire $m$ représentants. Certaines configurations peuvent toutefois rendre
-une nouvelle subdivision impossible. C'est notamment le cas lorsque plusieurs points
-sont identiques et que le coût de la feuille devient nul.
+La valeur \(m\) définit une taille cible maximale pour le coreset. Dans le cas général, la construction cherche à produire \(m\) représentants. Certaines configurations peuvent toutefois empêcher une nouvelle subdivision, notamment lorsque plusieurs observations sont identiques et que le coût d'une feuille devient nul.
 
-Dans cette situation, le coreset peut contenir moins de $m$ représentants sans que cela
-constitue une erreur. Les propriétés importantes sont alors que sa taille reste bornée
-par $m$ et que la masse totale soit correctement conservée.
-
+Dans cette situation, le coreset peut contenir moins de \(m\) représentants sans que cela constitue une erreur. Sa taille reste néanmoins bornée par \(m\) et la masse totale des données demeure conservée.
 
 % ---------------------------------------------------------------------------
 \section{Merge-and-reduce}
 \label{sec:algo-merge-reduce}
 % ---------------------------------------------------------------------------
 
-Le coreset tree permet de résumer un ensemble fini de points. Pour traiter un flux dont
-la taille totale n'est pas connue à l'avance, StreamKM++ lui associe une stratégie
-\textit{merge-and-reduce}.
+Le \emph{coreset tree} permet de résumer un ensemble fini de points. Pour traiter progressivement un flux dont la taille totale n'est pas nécessairement connue à l'avance, StreamKM++ utilise une stratégie \emph{merge-and-reduce} \cite{ackermann2012}.
 
-Le principe consiste à maintenir une série de buckets :
+Le principe consiste à maintenir plusieurs niveaux de stockage, appelés buckets :
 
 \[
-B_0,B_1,B_2,\ldots
+B_0, B_1, B_2, \ldots
 \]
 
-Le premier bucket, $B_0$, reçoit directement les observations du flux. Lorsqu'il atteint
-la taille $m$, son contenu est propagé vers les niveaux supérieurs.
+Le premier niveau reçoit les observations du flux. Lorsque la quantité de données à traiter atteint le seuil défini par la taille du coreset, les données sont résumées puis propagées vers les niveaux supérieurs.
 
-Si le bucket suivant est vide, le résumé obtenu y est stocké. S'il contient déjà un
-coreset, les deux ensembles sont réunis puis réduits à nouveau à l'aide du coreset tree.
-Cette propagation se poursuit tant que le niveau suivant est occupé.
+Si le niveau suivant est libre, le résumé y est stocké. Lorsqu'il contient déjà un coreset, les deux résumés sont réunis puis réduits à nouveau afin de produire un nouveau coreset de taille bornée. Cette propagation se poursuit tant que le niveau suivant est occupé.
 
-Le mécanisme est analogue à une retenue dans une addition binaire : plusieurs petits
-résumés sont progressivement fusionnés pour représenter des portions de plus en plus
-importantes du flux.
+Le fonctionnement est comparable à la propagation d'une retenue dans une représentation binaire. Les résumés sont progressivement fusionnés afin de représenter des portions de plus en plus importantes du flux sans conserver l'ensemble des observations originales.
 
 \paragraph{Invariants de la structure.}
 
-Le bucket $B_0$ contient au plus $m$ points en attente de réduction. Les buckets de
-niveau supérieur contiennent des résumés pondérés dont la taille reste bornée par $m$.
-
-Dans la formulation générale de l'algorithme, chaque réduction cherche à produire un
-coreset de taille $m$. Notre implémentation autorise toutefois une taille inférieure
-dans les cas dégénérés décrits précédemment. L'invariant utilisé ne porte donc pas sur
-l'obtention systématique d'exactement $m$ représentants, mais sur deux propriétés :
+Les résumés stockés dans les différents niveaux respectent deux propriétés principales :
 
 \begin{itemize}
-    \item la taille des résumés reste bornée par $m$ ;
-    \item la masse totale représentée est conservée au cours des fusions.
+    \item leur taille reste bornée par \(m\) ;
+    \item la masse totale représentée est conservée lors des différentes fusions.
 \end{itemize}
 
-Cette distinction permet notamment de gérer correctement des ensembles comportant de
-nombreux points identiques.
+La taille d'un résumé peut être inférieure à \(m\) dans les cas dégénérés décrits précédemment. L'invariant porte donc sur une taille maximale plutôt que sur l'obtention systématique d'exactement \(m\) représentants.
 
 \paragraph{Coreset courant.}
 
-À tout instant, l'union des buckets non vides constitue un résumé pondéré de toutes les
-observations déjà consommées. Le nombre de niveaux augmente progressivement avec la
-taille du flux, ce qui permet de maintenir une consommation mémoire contrôlée sans avoir
-besoin de connaître à l'avance le nombre total d'observations.
+À tout instant, l'ensemble des buckets non vides constitue un résumé pondéré des observations déjà traitées. Le nombre de niveaux augmente avec la quantité de données reçue, ce qui permet de contrôler la consommation mémoire sans nécessiter la connaissance préalable de la taille totale du flux.
 
-Lorsqu'un clustering est demandé, les représentants présents dans les différents
-buckets sont rassemblés afin de former le coreset courant. K-means++ et Lloyd peuvent
-alors être appliqués sur ce résumé.
+Lorsqu'un clustering est demandé, les représentants contenus dans les différents buckets sont regroupés afin de constituer le coreset courant. L'initialisation k-means++ et l'algorithme de Lloyd pondéré sont ensuite appliqués à ce résumé.
 
-\paragraph{Fusion de deux résumés indépendants.}
+\paragraph{Fusion de résumés indépendants.}
 
-La propriété de composition des coresets permet également de fusionner des résumés
-construits indépendamment sur des sous-ensembles distincts des données. Les représentants
-des deux résumés peuvent être réunis puis réduits à nouveau pour obtenir un coreset de
-leur union.
+La composition des coresets permet également de combiner des résumés construits indépendamment sur des sous-ensembles distincts des données. Les représentants issus de plusieurs résumés peuvent être réunis puis réduits à nouveau afin d'obtenir un coreset représentant leur union.
 
-Cette propriété est particulièrement importante pour le portage vers Spark. Chaque
-partition peut construire indépendamment son propre résumé à l'aide d'un
-\texttt{BucketManager}. Les résumés produits par les partitions sont ensuite fusionnés
-progressivement pour obtenir un coreset global.
+Cette propriété est particulièrement adaptée à l'exécution distribuée avec Spark. Chaque partition peut construire indépendamment son propre résumé à l'aide d'un \texttt{BucketManager}. Les coresets obtenus sont ensuite fusionnés progressivement afin de produire un résumé global.
 
-L'algorithme de StreamKM++ reste ainsi contenu dans les couches
-\texttt{streamkm.core} et \texttt{streamkm.coreset}. La couche Spark n'a pas besoin de
-modifier la logique du coreset : elle organise uniquement l'exécution de ces opérations
-sur plusieurs partitions.
+La logique de StreamKM++ reste ainsi concentrée dans les packages \texttt{streamkm.core} et \texttt{streamkm.coreset}. La couche \texttt{streamkm.spark} prend en charge la distribution des traitements sans modifier le fonctionnement interne de la construction du coreset.
+```

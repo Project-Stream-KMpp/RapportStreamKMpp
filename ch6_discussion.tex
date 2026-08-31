@@ -1,12 +1,10 @@
+```latex id="2l9pyn"
 % ch6_discussion.tex
+
 \chapter{Discussion}
 \label{ch:discussion}
 
-Ce chapitre met en perspective les choix réalisés dans le portage de
-StreamKM++ vers Apache Spark. L'objectif n'est pas de reprendre les résultats
-du chapitre~\ref{ch:evaluation}, mais d'en dégager les principaux apports et
-les limites de l'implémentation obtenue.
-
+Ce chapitre met en perspective les choix réalisés lors du portage de StreamKM++ vers Apache Spark. L'objectif est de revenir sur les principaux apports de l'implémentation et d'en présenter les limites à partir des résultats expérimentaux obtenus.
 
 % ---------------------------------------------------------------------------
 \section{Apports de l'implémentation}
@@ -14,105 +12,49 @@ les limites de l'implémentation obtenue.
 
 \paragraph{Une construction du coreset adaptée au traitement de flux.}
 
-Le principal intérêt de StreamKM++ réside dans sa capacité à construire
-progressivement un résumé des observations sans conserver l'ensemble du flux
-en mémoire. Lors de la construction du coreset, les points sont consommés
-progressivement par le mécanisme merge-and-reduce présenté au
-chapitre~\ref{ch:algorithmes}.
+L'un des principaux intérêts de StreamKM++ réside dans sa capacité à construire progressivement un résumé des observations sans conserver l'ensemble du flux en mémoire. Les données sont intégrées au mécanisme de \emph{merge-and-reduce} présenté au chapitre~\ref{ch:algorithmes}, qui maintient un ensemble de résumés pondérés de taille contrôlée.
 
-La quantité de données conservée dépend ainsi principalement de la taille
-$m$ du coreset et du nombre de niveaux nécessaires dans la structure de
-buckets, plutôt que directement du nombre total d'observations déjà
-consommées. Cette propriété permet d'envisager le traitement de flux dont la
-taille finale n'est pas connue à l'avance.
+La quantité de données conservée dépend principalement de la taille \(m\) du coreset et du nombre de niveaux utilisés par la structure de buckets, plutôt que directement du nombre total d'observations déjà traitées. Ce fonctionnement permet d'envisager le traitement de flux dont la taille totale n'est pas connue à l'avance.
 
-Il convient toutefois de distinguer la construction du coreset du protocole
-expérimental utilisé dans ce projet. Pour mesurer la SSE des centres obtenus
-sur les données originales, les expériences peuvent nécessiter un parcours
-supplémentaire du jeu de données. Cette seconde lecture appartient à
-l'évaluation du modèle et non à l'algorithme StreamKM++ lui-même.
+Il convient toutefois de distinguer la construction du coreset du protocole utilisé pour évaluer la qualité du clustering. Dans les expériences réalisées, la SSE est calculée sur l'ensemble des observations originales après la détermination des centres. Ce parcours supplémentaire appartient à l'évaluation du modèle et non à la construction du coreset elle-même.
 
+\paragraph{Une séparation entre logique algorithmique et distribution.}
 
-\paragraph{Une séparation claire entre logique algorithmique et distribution.}
+L'architecture du projet sépare les composants algorithmiques des mécanismes propres à Spark. Les packages \texttt{streamkm.core} et \texttt{streamkm.coreset} regroupent les opérations de clustering et de construction des coresets, tandis que \texttt{streamkm.spark} prend en charge leur exécution distribuée.
 
-L'architecture du projet sépare les composants de clustering des mécanismes
-propres à Spark. Les packages \texttt{streamkm.core} et
-\texttt{streamkm.coreset} contiennent respectivement les opérations liées à
-k-means et aux coresets, tandis que \texttt{streamkm.spark} organise leur
-exécution distribuée.
+Cette organisation a permis de valider les principales propriétés de l'algorithme indépendamment de Spark avant son intégration dans le pipeline distribué. Les mêmes composants, notamment \texttt{BucketManager}, \texttt{CoresetTree} et \texttt{KMeans}, sont ainsi utilisés par les versions séquentielle et distribuée.
 
-Cette séparation a permis de valider les principales propriétés
-algorithmiques indépendamment de Spark avant leur intégration dans le
-pipeline distribué. Les mêmes classes \texttt{BucketManager},
-\texttt{CoresetTree} et \texttt{KMeans} sont ainsi réutilisées dans les
-versions séquentielle et distribuée.
+Les résultats expérimentaux présentés au chapitre~\ref{ch:evaluation} montrent que les deux implémentations produisent des SSE très proches dans les configurations étudiées. Cette proximité constitue un indicateur de la cohérence de l'adaptation réalisée.
 
-Les résultats de validation présentés au chapitre~\ref{ch:evaluation}
-montrent notamment que les versions séquentielle et Spark produisent des
-coûts très proches sur les configurations étudiées, ce qui constitue un
-indicateur important de la cohérence du portage.
+\paragraph{Une construction distribuée par partition.}
 
+Le modèle de partitionnement de Spark s'intègre naturellement à la construction des coresets. Chaque partition construit indépendamment un résumé local à partir des observations qui lui sont attribuées. Les différents résumés sont ensuite fusionnés afin de produire le coreset global.
 
-\paragraph{Une construction naturellement distribuable par partition.}
+Cette organisation permet d'effectuer la construction locale directement sur les partitions contenant les données. Seuls les résumés intermédiaires doivent ensuite être combinés lors de la phase de réduction.
 
-Le partitionnement des données proposé par Spark s'intègre bien à la structure
-de StreamKM++. Chaque partition construit indépendamment un coreset local,
-puis ces résumés sont fusionnés pour produire le coreset global.
+Les résultats obtenus sur Covertype montrent que cette décomposition ne conduit pas, dans les configurations testées, à une dégradation notable de la qualité par rapport à l'implémentation séquentielle.
 
-Cette organisation limite les échanges de données : les observations
-originales restent dans leurs partitions pendant la construction locale et
-seuls les résumés doivent être combinés lors de la phase de réduction.
+\paragraph{Une fusion adaptée au modèle Spark.}
 
-La qualité observée lors des premières expériences montre que cette
-décomposition n'entraîne pas, sur les configurations testées, de dégradation
-importante par rapport à la version séquentielle.
+La méthode \texttt{treeReduce} permet de combiner progressivement les \texttt{BucketManager} produits par les différentes partitions. La fusion est organisée sous forme arborescente plutôt que par une récupération immédiate de l'ensemble des résumés sur le driver.
 
+Ce choix correspond au modèle de réduction fourni par Spark et permet de réutiliser directement la méthode de fusion définie dans le mécanisme \emph{merge-and-reduce}.
 
-\paragraph{Une fusion arborescente adaptée au modèle Spark.}
-
-L'utilisation de \texttt{treeReduce} permet d'organiser la fusion des
-\texttt{BucketManager} sur plusieurs niveaux au lieu de centraliser
-immédiatement toutes les opérations de combinaison sur le driver.
-
-Ce choix répond à une limite identifiée dans l'implémentation Flink de
-référence, où la fusion finale des coresets constitue une étape peu
-parallélisable. L'architecture Spark permet ici d'exprimer cette réduction
-sous une forme plus distribuée.
-
-Il reste cependant nécessaire de distinguer l'intérêt architectural de ce
-choix de son impact réel sur les performances. Celui-ci dépend notamment du
-nombre de partitions, de la taille des coresets, du coût des opérations de
-fusion et des ressources matérielles disponibles. Il doit donc être évalué
-expérimentalement plutôt que supposé a priori.
-
+Cette organisation constitue un choix architectural du portage. Son impact précis sur les performances n'a toutefois pas été isolé expérimentalement dans le cadre du projet et ne peut donc pas être quantifié à partir des résultats présentés.
 
 \paragraph{Une évaluation distribuée de la qualité.}
 
-Le calcul de la SSE est également distribué. Les centres, dont la taille reste
-faible par rapport au jeu de données, sont diffusés aux exécuteurs avec une
-variable \texttt{broadcast}. Chaque partition calcule ensuite sa contribution
-au coût global avant l'agrégation finale.
+L'évaluation du clustering est également réalisée de manière distribuée. Les centres obtenus sont transmis aux exécuteurs à l'aide d'une variable \texttt{broadcast}. Chaque partition calcule ensuite la contribution de ses observations à la SSE, avant l'agrégation des résultats partiels.
 
-Cette séparation entre construction des centres et évaluation sur les données
-originales est importante. Elle évite de mesurer uniquement la qualité du
-clustering sur le coreset et permet de comparer les différentes méthodes sur
-une métrique commune.
+Cette séparation entre la construction des centres à partir du coreset et leur évaluation sur les données originales permet de comparer les différentes méthodes sur une métrique commune.
 
+\paragraph{Une adaptation aux mécanismes propres à Spark.}
 
-\paragraph{Un portage qui exploite les mécanismes propres à Spark.}
+Le portage de StreamKM++ ne consiste pas uniquement à remplacer les opérateurs Flink par des opérations Spark équivalentes. L'orchestration du traitement est adaptée au modèle d'exécution du framework.
 
-Le passage de Flink à Spark ne se limite pas à remplacer des opérateurs par
-leurs équivalents syntaxiques. Plusieurs étapes du pipeline ont dû être
-réorganisées selon le modèle d'exécution de Spark.
+Structured Streaming fournit notamment les micro-batches utilisés comme unités de traitement successives, tandis que les mécanismes \texttt{broadcast} et \texttt{treeReduce} sont utilisés respectivement pour diffuser les centres et combiner les résumés intermédiaires.
 
-Structured Streaming fournit par exemple explicitement les frontières des
-micro-batches avec \texttt{foreachBatch}, tandis que les opérations de
-\texttt{broadcast} et de \texttt{treeReduce} offrent des mécanismes directs
-pour diffuser les centres et fusionner les résultats intermédiaires.
-
-Le portage a donc conduit à conserver la logique algorithmique de StreamKM++
-tout en adaptant l'orchestration au modèle d'exécution du framework cible.
-
+L'implémentation conserve ainsi la logique algorithmique de StreamKM++ tout en adaptant son exécution aux abstractions fournies par Spark.
 
 % ---------------------------------------------------------------------------
 \section{Limites de l'implémentation}
@@ -120,152 +62,75 @@ tout en adaptant l'orchestration au modèle d'exécution du framework cible.
 
 \paragraph{Le clustering final reste exécuté sur le driver.}
 
-Après la construction du coreset global, \texttt{KMeans.fit} est exécuté sur
-le driver. Cette étape reste donc séquentielle dans l'implémentation actuelle.
+Après la construction du coreset global, \texttt{KMeans.fit} est exécuté sur le driver. Cette étape n'est donc pas distribuée dans l'implémentation actuelle.
 
-Ce choix est cohérent avec le principe de StreamKM++ : le coreset étant
-sensiblement plus petit que les données originales, l'étape finale doit rester
-d'un coût limité. Elle peut néanmoins devenir significative lorsque $m$, $k$
-ou le nombre de redémarrages augmentent.
+Ce choix reste cohérent avec le principe de StreamKM++, puisque le clustering final est réalisé sur un résumé dont la taille est nettement inférieure à celle du jeu de données original. Son coût peut toutefois augmenter lorsque la taille \(m\) du coreset, le nombre de clusters \(k\) ou le nombre de redémarrages de k-means++ augmentent.
 
-L'ajout de ressources Spark n'accélère pas directement cette partie du
-traitement. Elle constitue donc une limite potentielle de la scalabilité
-globale.
+L'ajout de ressources Spark n'agit donc pas directement sur cette partie du traitement.
 
+\paragraph{La version Structured Streaming maintient un état global sur le driver.}
 
-\paragraph{La version Structured Streaming repose sur un état global côté driver.}
+Dans l'adaptation avec Structured Streaming, chaque micro-batch produit un coreset distribué qui est ensuite intégré dans un \texttt{BucketManager} global conservé sur le driver.
 
-Dans l'adaptation streaming, chaque micro-batch produit d'abord un coreset
-distribué, puis ce résumé est intégré dans un \texttt{BucketManager} global
-conservé sur le driver.
+Cette approche simplifie la conservation d'un résumé entre les micro-batches, mais introduit également un point central dans l'architecture.
 
-Cette solution simplifie la gestion de l'état entre les micro-batches, mais
-elle introduit également un point central dans l'architecture.
-
-Par ailleurs, l'insertion successive de coresets déjà pondérés dans cet état
-global n'est pas strictement équivalente à l'insertion directe de tous les
-points bruts dans une unique structure merge-and-reduce. La version streaming
-doit donc être considérée comme une adaptation pratique du principe général,
-et non comme une reproduction strictement identique du traitement
-séquentiel.
-
+La version streaming constitue ainsi une adaptation du principe général de StreamKM++ au traitement par micro-batches. Elle ne reproduit pas exactement l'ordre d'insertion qui serait obtenu en alimentant directement une structure unique avec l'ensemble des observations brutes.
 
 \paragraph{Latence liée au traitement par micro-batches.}
 
-Dans notre implémentation, Structured Streaming est utilisé en mode
-micro-batch. Les observations sont donc traitées lorsque Spark exécute le lot
-auquel elles appartiennent, et non nécessairement dès leur arrivée.
+Structured Streaming est utilisé en mode \emph{micro-batch}. Les observations sont donc prises en compte lors de l'exécution du lot auquel elles appartiennent et non nécessairement au moment exact de leur arrivée.
 
-Cette organisation introduit une latence liée à la durée du micro-batch et au
-temps nécessaire à son traitement. Elle distingue la solution Spark d'un
-traitement événement par événement tel que celui utilisé dans l'architecture
-Flink de référence.
+La latence dépend ainsi de la fréquence de déclenchement des micro-batches et du temps nécessaire à leur traitement. Cette caractéristique distingue l'implémentation Spark d'un traitement événement par événement.
 
-Cette limite est surtout importante pour des applications nécessitant une
-réaction à très faible latence. Elle est moins critique lorsque l'objectif
-principal est de maintenir périodiquement un résumé du flux.
+Elle devient principalement importante pour les applications nécessitant une réaction à très faible latence. Elle est moins contraignante lorsque l'objectif consiste à mettre à jour périodiquement un résumé du flux.
 
+\paragraph{État interne non directement exposé.}
 
-\paragraph{Absence d'équivalent direct à Queryable State.}
+L'implémentation retenue conserve le \texttt{BucketManager} global à l'intérieur du traitement Structured Streaming. Cet état n'est pas directement exposé pour être interrogé depuis l'extérieur du job.
 
-La thèse exploite les mécanismes d'état de Flink pour permettre l'interrogation
-de certaines informations internes du job.
+Les modèles produits peuvent être transmis à une fonction ou à un mécanisme de sortie, mais l'état interne de la structure de coreset reste encapsulé dans le traitement.
 
-L'architecture Spark retenue dans ce projet ne fournit pas de mécanisme
-strictement équivalent permettant d'interroger directement le
-\texttt{BucketManager} global depuis l'extérieur du traitement.
-
-Les modèles obtenus peuvent être transmis à un sink ou à une fonction externe,
-mais cela constitue un mécanisme différent de l'exposition directe de l'état
-interne proposée par Flink.
-
+Cette différence doit être prise en compte lors de la comparaison avec l'implémentation Flink de référence, qui s'appuie sur ses propres mécanismes de gestion d'état.
 
 \paragraph{Sensibilité au partitionnement et à l'aléatoire.}
 
-La construction distribuée dépend du nombre de partitions. Chaque partition
-construit son propre coreset à partir d'un sous-ensemble différent des données
-et utilise une graine dérivée de son indice.
+La construction distribuée dépend du partitionnement des données. Chaque partition traite un sous-ensemble différent des observations et construit son propre coreset avant la fusion globale.
 
-Deux exécutions réalisées avec le même partitionnement et les mêmes graines
-peuvent être reproduites. En revanche, modifier le nombre de partitions
-modifie la décomposition des données et peut donc conduire à un coreset global
-différent.
+Pour un même partitionnement et les mêmes graines, l'exécution peut être reproduite. Modifier le nombre de partitions modifie cependant la décomposition des données et peut donc conduire à des résumés intermédiaires et à un coreset final différents.
 
-Il ne s'agit pas nécessairement d'une erreur : les algorithmes de
-construction des coresets et k-means++ comportent eux-mêmes des étapes
-aléatoires. Cette propriété impose cependant de contrôler explicitement le
-partitionnement et les graines dans le protocole expérimental.
+Cette sensibilité est également liée aux étapes aléatoires présentes dans la construction du coreset et dans l'initialisation k-means++. Elle justifie le contrôle du partitionnement et des graines dans les expériences.
 
+\paragraph{Variabilité liée à la taille du coreset.}
 
-\paragraph{L'influence de la taille du coreset n'est pas strictement monotone.}
+Les expériences réalisées montrent une diminution de la SSE lorsque la taille \(m\) du coreset augmente dans les configurations testées. L'amélioration est particulièrement visible entre les plus petites tailles, puis devient plus limitée lorsque le coreset augmente.
 
-Les expériences réalisées sur le sous-ensemble de Covertype montrent une
-amélioration du coût lorsque $m$ augmente dans certaines configurations, mais
-cette tendance n'est pas strictement monotone.
+Cette tendance reste toutefois observée sur une seule exécution par configuration avec une graine fixe. Elle ne permet donc pas de conclure à une diminution systématique de la SSE pour toute exécution.
 
-Ce résultat rappelle qu'une augmentation de la taille du coreset ne garantit
-pas, pour une exécution donnée, une diminution systématique de la SSE. Le
-processus de construction du résumé ainsi que l'initialisation k-means++
-restent aléatoires.
-
-Une caractérisation plus robuste de l'effet de $m$ nécessiterait plusieurs
-répétitions avec différentes graines, puis une analyse des moyennes et des
-variations observées.
-
+Une étude plus complète nécessiterait plusieurs répétitions avec différentes graines afin de mesurer la variabilité des résultats et de caractériser plus précisément l'influence de \(m\).
 
 \paragraph{Absence de standardisation des variables de Covertype.}
 
-Les expériences utilisent les 54 variables de Covertype sans transformation
-de leur échelle, afin de rester cohérentes avec le protocole retenu pour ce
-projet.
+Les expériences utilisent les 54 variables de Covertype sans standardisation préalable afin de conserver un protocole identique pour toutes les méthodes comparées.
 
-Certaines variables numériques peuvent prendre des valeurs de plusieurs
-milliers, tandis que d'autres correspondent à des indicateurs binaires.
-Dans une distance euclidienne au carré, les variables de grande amplitude
-peuvent donc contribuer davantage au coût.
+Les attributs du jeu de données n'ont cependant pas tous la même échelle. Certaines variables prennent des valeurs relativement élevées, tandis que d'autres correspondent à des indicateurs binaires. Dans le calcul d'une distance euclidienne au carré, les variables de plus grande amplitude peuvent donc avoir une influence plus importante.
 
-Une standardisation modifierait la géométrie du problème et pourrait produire
-des clusters différents. Elle constitue une piste d'étude intéressante, mais
-n'a pas été intégrée au protocole actuel afin de conserver les mêmes données
-d'entrée pour l'ensemble des méthodes comparées.
-
+Une standardisation modifierait la géométrie du problème de clustering et pourrait conduire à des résultats différents. Son influence n'a pas été étudiée dans le cadre du projet.
 
 \paragraph{Absence de mécanisme d'oubli.}
 
-Le merge-and-reduce utilisé par StreamKM++ représente l'ensemble des
-observations vues depuis le début du flux. Les données anciennes continuent
-donc à contribuer au coreset même lorsque la distribution du flux évolue.
+Le mécanisme \emph{merge-and-reduce} de StreamKM++ construit un résumé de l'ensemble des observations traitées depuis le début du flux. Les données anciennes continuent donc à contribuer au coreset lorsque de nouvelles observations sont ajoutées.
 
-Cette propriété convient lorsque la distribution des données est relativement
-stable. Elle devient en revanche une limite dans un contexte de
-\textit{concept drift}, où les observations récentes devraient éventuellement
-avoir davantage d'influence que les anciennes.
+Ce fonctionnement est adapté lorsque la distribution des données reste relativement stable. Il peut en revanche devenir moins adapté lorsque cette distribution évolue au cours du temps.
 
-L'ajout d'une fenêtre glissante ou d'un mécanisme de décroissance des poids
-constituerait une extension possible, mais sort du périmètre de
-l'implémentation étudiée.
-
+L'utilisation d'une fenêtre glissante ou d'un mécanisme donnant davantage de poids aux observations récentes constituerait une extension possible, mais n'entre pas dans le périmètre de l'implémentation réalisée.
 
 % ---------------------------------------------------------------------------
 \section{Bilan}
 % ---------------------------------------------------------------------------
 
-Les résultats obtenus montrent que le portage de StreamKM++ vers Spark est
-possible sans modifier profondément les composants algorithmiques de
-l'approche. La construction de coresets locaux par partition et leur fusion
-permettent de conserver une qualité de clustering proche de la version
-séquentielle sur les configurations étudiées.
+Le portage réalisé montre que les principaux composants de StreamKM++ peuvent être réutilisés dans une architecture Spark sans modification profonde de leur logique algorithmique. La construction de coresets locaux sur les partitions et leur fusion permettent d'obtenir une qualité de clustering très proche de celle de l'implémentation séquentielle dans les configurations testées.
 
-L'intérêt principal du portage réside dans la possibilité de distribuer les
-étapes les plus coûteuses sur les données originales tout en conservant un
-résumé global de taille contrôlée.
+La solution conserve néanmoins certains traitements centralisés, notamment le clustering final et l'état global utilisé entre les micro-batches. Les résultats obtenus doivent également être interprétés en tenant compte du caractère aléatoire de l'algorithme et du protocole expérimental limité à une exécution par configuration.
 
-La solution reste toutefois partiellement centralisée : le clustering final
-et l'état utilisé entre les micro-batches résident sur le driver. Les
-performances globales dépendent également du partitionnement, du paramètre
-$m$ et des coûts propres au moteur Spark.
-
-Ces éléments montrent que l'intérêt de StreamKM++ sur Spark repose sur un
-compromis entre réduction des données, qualité du clustering et coût de la
-distribution. Les perspectives présentées dans le chapitre suivant découlent
-directement de ces limites.
+Dans l'ensemble, l'implémentation permet d'adapter StreamKM++ au modèle de traitement de Spark tout en conservant la qualité du clustering observée avec la version séquentielle. Les limites identifiées ouvrent plusieurs pistes d'amélioration, présentées dans le chapitre suivant.
+```

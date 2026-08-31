@@ -1,54 +1,30 @@
+```latex
 % ch7_conclusion.tex
+
 \chapter{Conclusion et perspectives}
 \label{ch:conclusion}
 
-Ce rapport a décrit le portage de StreamKM++ depuis l'implémentation Flink
-de Bitsakis (2018)~\cite{bitsakis2018} vers Apache Spark. Les trois briques algorithmiques de la
-thèse --- Lloyd pondéré, seeding $k$-means++, coreset tree et
-merge-and-reduce --- ont été implémentées et validées indépendamment de tout
-moteur de calcul distribué (chapitre~\ref{ch:algorithmes}), avant d'être
-orchestrées par une couche Spark qui ne contient elle-même aucune logique
-algorithmique propre (chapitre~\ref{ch:implementation}). Cet ordre --- théorie,
-puis framework, puis implémentation opérateur par opérateur, puis validation
-de la qualité avant la scalabilité --- a été tenu tout au long du projet, et
-a permis de découvrir et corriger un bug réel (une graine aléatoire mal
-propagée dans la fusion de coresets) avant qu'il n'affecte les expériences
-du chapitre~\ref{ch:evaluation}.
+Ce rapport a présenté le portage de StreamKM++ depuis l'implémentation Flink proposée par Bitsakis (2018)~\cite{bitsakis2018} vers Apache Spark. Les principaux composants algorithmiques, notamment l'algorithme de Lloyd pondéré, l'initialisation k-means++, la construction du coreset et la stratégie \emph{merge-and-reduce}, ont d'abord été implémentés et validés indépendamment de Spark. Ils ont ensuite été intégrés à une couche distribuée reposant sur les RDD, \texttt{treeReduce} et Structured Streaming.
 
-Le portage confirme ce que l'énoncé posait comme question implicite : une
-partie du dataflow de la thèse se traduit directement (voire se simplifie,
-comme la disparition de \texttt{HandleWatermark} ou la méthodologie
-d'évaluation du coût), une partie se traduit avec un gain net (la fusion
-arborescente des coresets, qui répond directement au goulot que la thèse
-identifie elle-même), et une partie ne se traduit pas du tout (Queryable
-State) --- sans que cela remette en cause la viabilité du portage dans son
-ensemble (chapitre~\ref{ch:discussion}).
+L'implémentation retenue sépare la logique algorithmique des mécanismes propres au framework distribué. Chaque partition Spark peut ainsi construire un résumé local des données qui lui sont attribuées, avant que les différents coresets soient fusionnés pour produire un résumé global. Structured Streaming permet d'appliquer le même principe à des micro-batches successifs tout en maintenant un coreset représentant les observations déjà traitées.
 
-\section{Travaux futurs}
+L'évaluation réalisée sur le jeu de données Covertype montre que la version distribuée conserve une qualité de clustering très proche de celle de l'implémentation séquentielle. Pour les valeurs de \(k\) étudiées, l'écart relatif entre leurs SSE reste inférieur à \(0.7\,\%\). La variation de la taille du coreset conduit également à des résultats proches entre les deux versions, avec un écart maximal d'environ \(0.63\,\%\). Les coûts obtenus restent par ailleurs proches de ceux produits par Spark MLlib, malgré l'utilisation d'un résumé des données dans StreamKM++.
 
-\paragraph{Variante à requêtes périodiques (§4.3 de la thèse).} Décrite mais
-non implémentée faute de temps (chapitre~\ref{ch:implementation},
-§\ref{sec:impl-requetes}) --- le chemin d'implémentation est cependant déjà
-balisé : \texttt{Trigger.ProcessingTime} pour la ré-évaluation périodique,
-\texttt{BucketManager.extractCoreset} (qui ne vide jamais l'état) pour
-dupliquer le coreset courant à plusieurs valeurs de $k$.
+Ces résultats montrent que la distribution de la construction du coreset peut être réalisée avec Spark sans dégradation notable de la qualité du clustering dans les configurations étudiées. Ils doivent néanmoins être interprétés dans les limites du protocole expérimental, notamment l'utilisation d'une seule exécution par configuration et d'une graine fixe.
 
-\paragraph{Un vrai équivalent de Queryable State.} La seule perte de
-fonctionnalité nette identifiée dans ce portage
-(chapitre~\ref{ch:discussion}). Une piste non explorée : un service externe
-léger interrogeant directement l'état exposé par \texttt{onModel}, plutôt
-qu'un sink \texttt{memory} + SQL --- à évaluer en termes de fraîcheur et de
-complexité ajoutée.
+L'expérimentation complémentaire sur la représentation mémoire des points a également montré que la variante SoA fondée sur un \texttt{DoubleBuffer} hors tas n'apportait pas d'amélioration par rapport à la représentation AoS initiale. Celle-ci a donc été conservée pour l'implémentation finale.
 
-\paragraph{Gestion du concept drift.} Ajouter un mécanisme d'oubli
-(fenêtre glissante sur les buckets les plus anciens, ou facteur de
-décroissance à la \texttt{StreamingKMeans}) permettrait de traiter des flux
-dont la distribution change réellement dans le temps --- hors du périmètre
-de StreamKM++ tel que défini par la thèse, mais une extension naturelle.
+\section{Perspectives}
 
-\paragraph{Poursuivre l'optimisation du kernel local.} Le travail
-Structure-of-Arrays / hors-tas engagé sur \texttt{core}/\texttt{coreset}
-(chapitre~\ref{ch:evaluation}, benchmarks JMH) ouvre la voie à des
-optimisations supplémentaires une fois les résultats consolidés --- en
-particulier sur \texttt{CoresetTree.build}, identifié dès la spécification
-initiale comme le point chaud principal du pipeline.
+Plusieurs prolongements peuvent être envisagés à partir de ce travail.
+
+Une première perspective consiste à approfondir l'évaluation expérimentale en répétant les différentes configurations avec plusieurs graines. Cette approche permettrait de mesurer la variabilité liée aux étapes aléatoires de la construction du coreset et de k-means++, et de consolider les comparaisons entre les versions séquentielle et distribuée.
+
+L'influence de la taille du coreset pourrait également être étudiée plus finement. Les expériences réalisées montrent une amélioration de la SSE lorsque \(m\) augmente, mais avec des gains qui deviennent progressivement plus faibles. Des essais supplémentaires permettraient de mieux caractériser le compromis entre la taille du résumé, la qualité du clustering et le coût des traitements.
+
+Une autre perspective concerne la représentation mémoire. Les benchmarks réalisés montrent que l'utilisation d'un \texttt{DoubleBuffer} hors tas est moins performante dans le contexte étudié. Une représentation SoA reposant sur un tableau \texttt{Array[Double]} plat conservé sur le tas pourrait être évaluée afin de distinguer l'effet de la disposition des données de celui du stockage hors tas.
+
+Enfin, l'adaptation à des flux dont la distribution évolue au cours du temps constitue une extension possible. Le mécanisme actuel conserve l'influence de l'ensemble des observations passées. L'introduction d'une fenêtre glissante ou d'un mécanisme de décroissance des poids permettrait d'accorder davantage d'importance aux données récentes dans les contextes soumis à une évolution de la distribution.
+
+Dans son périmètre actuel, ce projet fournit ainsi une implémentation de StreamKM++ adaptée à Apache Spark et validée expérimentalement sur un jeu de données réel. Il montre qu'une construction distribuée du coreset peut préserver une qualité de clustering proche de celle obtenue avec l'implémentation séquentielle, tout en conservant une architecture compatible avec le modèle de traitement de Spark.
+```
