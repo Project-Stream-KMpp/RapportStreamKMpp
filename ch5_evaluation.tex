@@ -1,317 +1,499 @@
-```latex
-% !TeX root = main.tex
-
+% ch5_evaluation.tex
 \chapter{Évaluation expérimentale}
 \label{ch:evaluation}
 
-Ce chapitre évalue l'implémentation de StreamKM++ réalisée dans le cadre du projet. L'évaluation suit trois étapes. La première consiste à vérifier la correction des principales briques algorithmiques indépendamment de Spark. La deuxième étudie la qualité du clustering obtenu sur un jeu de données réel, en comparant notamment les versions séquentielle et distribuée de StreamKM++ ainsi que l'implémentation K-Means de Spark MLlib. Enfin, la troisième partie porte sur la scalabilité de la solution lorsque le volume de données et le degré de parallélisme augmentent.
+Ce chapitre présente l'implémentation de StreamKM++ avec Apache Spark.
+L'objectif est de montrer comment les mécanismes décrits au
+chapitre~\ref{ch:spark} sont utilisés pour distribuer les différentes étapes
+de l'algorithme présenté au chapitre~\ref{ch:algorithmes}.
 
-Cet ordre permet de vérifier la validité des résultats avant d'étudier les performances de l'implémentation distribuée. Une amélioration du temps d'exécution n'aurait en effet que peu d'intérêt si elle s'accompagnait d'une dégradation importante de la qualité du clustering.
+L'implémentation repose sur une séparation entre les composants algorithmiques
+et l'orchestration distribuée. Les calculs liés à k-means, au coreset tree et
+au merge-and-reduce restent dans les packages \texttt{streamkm.core} et
+\texttt{streamkm.coreset}. La couche \texttt{streamkm.spark} organise leur
+exécution sur les partitions Spark, la fusion des résultats intermédiaires et
+le traitement des micro-batches.
+
+Le portage est présenté en quatre étapes : la construction distribuée d'un
+coreset sur un jeu de données borné, le calcul distribué de la qualité du
+clustering, l'adaptation à Structured Streaming, puis une synthèse des
+principales différences entre l'implémentation Flink de référence et la
+version Spark développée dans ce projet.
 
 
-\section{Protocole expérimental}
-\label{sec:eval-protocole}
+% ---------------------------------------------------------------------------
+\section{Construction distribuée du coreset}
+\label{sec:impl-dataflow}
+% ---------------------------------------------------------------------------
 
-Les expériences de qualité sont réalisées sur le jeu de données Covertype. Ce jeu contient 581\,012 observations décrites par 54 attributs numériques utilisés pour le clustering. La variable correspondant à la classe associée à chaque observation n'est pas utilisée par StreamKM++, l'algorithme étant non supervisé.
+La construction distribuée suit le principe général de StreamKM++ : chaque
+sous-ensemble des données est d'abord résumé localement, puis les résumés
+obtenus sont fusionnés pour produire un coreset global.
 
-Une première phase d'expérimentation est menée sur un sous-ensemble constitué des 20\,000 premières observations. Cette étape permet de vérifier le fonctionnement du pipeline expérimental et la cohérence des résultats avant d'exécuter les expériences sur le jeu de données complet.
+Dans Spark, les partitions du RDD fournissent naturellement ces sous-ensembles.
+Chaque partition peut donc exécuter indépendamment le même traitement
+merge-and-reduce avant la phase de fusion.
 
-Pour les expériences distribuées, les données sont parallélisées sous forme de RDD et réparties entre huit partitions Spark. Chaque partition construit un résumé local des observations qui lui sont attribuées. Les coresets locaux obtenus sont ensuite fusionnés progressivement afin de construire un résumé global utilisé pour calculer les centres finaux.
 
-La qualité du clustering est mesurée à partir de la somme des erreurs quadratiques, ou \emph{Sum of Squared Errors} (SSE). Pour un ensemble de points $X$ et un ensemble de centres $C$, le coût est défini par :
+% ---------------------------------------------------------------------------
+\subsection{Coresets locaux par partition}
+% ---------------------------------------------------------------------------
+
+La méthode \texttt{StreamKMPlusPlus.partialCoresets} construit un coreset
+indépendant pour chaque partition du RDD.
+
+\begin{verbatim}
+def partialCoresets(
+  rdd: RDD[Point],
+  p: StreamKMParams
+): RDD[Array[Point]] = {
+
+  rdd.mapPartitionsWithIndex { (idx, it) =>
+    val bm = new BucketManager(
+      p.m,
+      p.seed + idx
+    )
+
+    bm.insertAll(it)
+
+    Iterator.single(
+      bm.extractCoreset()
+    )
+  }
+}
+\end{verbatim}
+
+Chaque partition crée son propre \texttt{BucketManager} puis consomme
+séquentiellement les points qui lui sont attribués. La construction du
+coreset local utilise donc exactement la même logique que la version
+séquentielle de StreamKM++, mais appliquée indépendamment sur chaque
+partition.
+
+Une graine dérivée de l'indice de partition est utilisée :
+
+\begin{verbatim}
+p.seed + idx
+\end{verbatim}
+
+Ce choix permet de conserver un comportement reproductible lorsque le nombre
+de partitions reste identique, tout en évitant que plusieurs partitions
+utilisent exactement la même suite pseudo-aléatoire.
+
+Le résultat de cette étape est un RDD contenant un résumé pondéré par
+partition. Ces résumés doivent ensuite être combinés pour obtenir une
+représentation globale des données.
+
+
+% ---------------------------------------------------------------------------
+\subsection{Fusion arborescente des coresets}
+% ---------------------------------------------------------------------------
+
+Dans l'implémentation Flink étudiée par Bitsakis, les coresets partiels sont
+réunis par un opérateur final exécuté avec un parallélisme limité. Dans notre
+version Spark, cette étape est exprimée à l'aide de \texttt{treeReduce}.
+
+\begin{verbatim}
+def mergeCoresets(
+  rdd: RDD[Point],
+  p: StreamKMParams,
+  depth: Int = 2
+): Array[Point] = {
+
+  val perPartition =
+    rdd.mapPartitionsWithIndex { (idx, it) =>
+
+      val bm =
+        new BucketManager(
+          p.m,
+          p.seed + idx
+        )
+
+      bm.insertAll(it)
+
+      Iterator.single(bm)
+    }
+
+  perPartition
+    .treeReduce(
+      (a, b) => a.merge(b),
+      depth
+    )
+    .extractCoreset()
+}
+\end{verbatim}
+
+Chaque élément de \texttt{perPartition} est donc un
+\texttt{BucketManager} construit localement. L'opération :
+
+\begin{verbatim}
+a.merge(b)
+\end{verbatim}
+
+réutilise directement la logique de fusion définie dans la couche
+\texttt{streamkm.coreset}. Deux résumés peuvent ainsi être combinés puis
+réduits avant d'être fusionnés à un niveau supérieur.
+
+L'utilisation de \texttt{treeReduce} évite de transférer immédiatement tous
+les résultats intermédiaires vers le driver pour les fusionner un à un. Les
+combinaisons sont organisées sur plusieurs niveaux, ce qui permet à une partie
+du travail de réduction d'être réalisée de manière distribuée.
+
+Cette organisation constitue une différence importante avec le dataflow Flink
+de référence. Son effet réel sur les performances n'est toutefois pas supposé
+a priori et sera évalué dans les expériences de scalabilité du
+chapitre~\ref{ch:evaluation}.
+
+
+% ---------------------------------------------------------------------------
+\subsection{Calcul du clustering final}
+% ---------------------------------------------------------------------------
+
+Une fois le coreset global obtenu, le clustering final est calculé avec
+\texttt{KMeans.fit}.
+
+Cette étape reprend directement les composants présentés au
+chapitre~\ref{ch:algorithmes} : initialisation k-means++, exécution de
+l'algorithme de Lloyd pondéré et conservation du meilleur résultat parmi les
+redémarrages réalisés.
+
+Le coreset final étant de taille limitée par le paramètre $m$, cette étape
+s'exécute sur le driver. Le parallélisme intervient donc principalement dans
+la construction et la fusion des résumés, et non dans l'exécution finale de
+k-means++ sur le coreset.
+
+
+% ---------------------------------------------------------------------------
+\subsection{Correspondance avec le dataflow Flink}
+% ---------------------------------------------------------------------------
+
+Le tableau~\ref{tab:flink-spark-bounded} résume les principales
+correspondances entre les opérateurs utilisés dans la thèse et les composants
+de notre implémentation Spark.
+
+\begin{table}[h]
+\centering
+\small
+
+\begin{tabular}{p{3.5cm}p{4.5cm}p{4.7cm}}
+\toprule
+
+\textbf{Opérateur Flink} &
+\textbf{Rôle} &
+\textbf{Équivalent Spark} \\
+
+\midrule
+
+\texttt{HdfsSource} &
+lecture distribuée des données &
+source fichier / RDD partitionné \\
+
+\texttt{HandleWatermark} &
+détection d'une frontière de traitement &
+frontière explicite du micro-batch avec \texttt{foreachBatch} \\
+
+\texttt{FlatMapToPoint} &
+conversion des données en points &
+\texttt{map} / \texttt{mapPartitions} \\
+
+\texttt{FlatMapToPartialCoresets} &
+construction d'un coreset local &
+\texttt{mapPartitionsWithIndex} \\
+
+\texttt{FlatMapToFinalCoreset} &
+fusion des coresets intermédiaires &
+\texttt{treeReduce} + \texttt{BucketManager.merge} \\
+
+\texttt{FlatMapToKmeansPP} &
+clustering final sur le coreset &
+\texttt{KMeans.fit} sur le driver \\
+
+\texttt{HdfsSink} &
+écriture du résultat &
+fonction de sortie ou sink Spark \\
+
+\bottomrule
+\end{tabular}
+
+\caption{Correspondance entre le dataflow Flink de référence et
+l'implémentation Spark.}
+\label{tab:flink-spark-bounded}
+
+\end{table}
+
+
+% ---------------------------------------------------------------------------
+\section{Évaluation distribuée du coût}
+\label{sec:impl-evaluation}
+% ---------------------------------------------------------------------------
+
+L'évaluation de la qualité du clustering nécessite de calculer la SSE sur les
+données originales et non uniquement sur le coreset.
+
+Cette étape est distribuée avec Spark afin que chaque partition calcule
+localement sa contribution au coût global.
+
+La méthode \texttt{CostEvaluator.cost} suit trois étapes :
+
+\begin{enumerate}
+    \item diffusion des centres à l'aide d'une variable broadcast ;
+    \item calcul du coût local sur chaque partition ;
+    \item agrégation des coûts partiels.
+\end{enumerate}
+
+L'implémentation est la suivante :
+
+\begin{verbatim}
+def cost(
+  points: RDD[Point],
+  centers: Array[Array[Double]],
+  depth: Int = 2
+): Double = {
+
+  val bcCenters =
+    points.sparkContext.broadcast(
+      centers
+    )
+
+  points
+    .mapPartitions { it =>
+      Iterator.single(
+        KMeans.cost(
+          it.toArray,
+          bcCenters.value
+        )
+      )
+    }
+    .treeReduce(
+      _ + _,
+      depth
+    )
+}
+\end{verbatim}
+
+Les centres sont suffisamment petits pour être diffusés à l'ensemble des
+exécuteurs. Chaque partition calcule ensuite la SSE de ses propres points,
+puis les contributions sont additionnées.
+
+Contrairement à la fusion des coresets, cette réduction ne modifie pas la
+structure du clustering : elle correspond uniquement à une somme de coûts
+locaux.
+
+Cette méthode est utilisée dans le protocole expérimental du
+chapitre~\ref{ch:evaluation}. Le coût reporté dans les expériences est ainsi
+toujours évalué sur les observations originales, même lorsque les centres ont
+été calculés à partir d'un coreset.
+
+
+% ---------------------------------------------------------------------------
+\section{Lecture distribuée de Covertype pour les expériences}
+% ---------------------------------------------------------------------------
+
+Les premières versions du protocole expérimental chargeaient le jeu de données
+Covertype dans un tableau local avant de le convertir en RDD avec
+\texttt{parallelize}. Cette approche était suffisante pour les petits tests,
+mais elle faisait transiter l'ensemble des observations par le driver avant
+leur distribution.
+
+Pour les expériences finales, le fichier est lu directement par Spark :
+
+\begin{verbatim}
+spark.sparkContext
+  .textFile(path, numPartitions)
+  .flatMap { line =>
+    parseCovertypeLine(line, dim)
+  }
+\end{verbatim}
+
+Le pipeline devient ainsi :
 
 \[
-\mathrm{SSE}(X,C)
-=
-\sum_{x \in X}
-\min_{c \in C}
-\|x-c\|^2.
+\text{fichier}
+\rightarrow
+RDD[String]
+\rightarrow
+RDD[Point].
 \]
 
-Dans toutes les expériences, ce coût est calculé sur les données originales et non sur le coreset. Le coreset intervient uniquement dans la détermination des centres. Cette distinction est importante : mesurer la SSE directement sur le résumé ne permettrait pas d'évaluer correctement la qualité du clustering obtenu sur l'ensemble initial.
+Cette modification évite la construction préalable d'un grand
+\texttt{Array[Point]} sur le driver et correspond mieux au modèle distribué
+étudié dans ce projet.
 
-Trois approches sont considérées :
+Pour la référence séquentielle, le fichier est au contraire parcouru à l'aide
+d'un itérateur. Les points sont transmis progressivement au
+\texttt{BucketManager} sans charger l'ensemble du jeu de données en mémoire.
+
+Une seconde lecture du fichier peut être effectuée après le calcul des centres
+afin d'évaluer la SSE sur toutes les observations. Cette seconde passe
+appartient au protocole de mesure et non à la construction du coreset
+elle-même.
+
+
+% ---------------------------------------------------------------------------
+\section{Adaptation à Structured Streaming}
+\label{sec:impl-streaming}
+% ---------------------------------------------------------------------------
+
+La version distribuée précédente traite un ensemble borné de données.
+\texttt{StreamKMPlusPlus.run} étend cette logique à Structured Streaming en
+utilisant \texttt{foreachBatch}.
+
+Une version simplifiée du traitement est la suivante :
+
+\begin{verbatim}
+def run(
+  source: DataFrame,
+  p: StreamKMParams,
+  onModel: KMeansModel => Unit,
+  featuresCol: String = "features"
+): StreamingQuery = {
+
+  val global =
+    new BucketManager(
+      p.m,
+      p.seed
+    )
+
+  source.writeStream
+    .foreachBatch { (batch, batchId) =>
+
+      val points =
+        batch.rdd.map { row =>
+          Point(
+            row
+              .getAs[Seq[Double]](
+                featuresCol
+              )
+              .toArray
+          )
+        }
+
+      val partial =
+        mergeCoresets(
+          points,
+          p.copy(
+            seed =
+              p.seed + batchId
+          )
+        )
+
+      partial.foreach(
+        global.insert
+      )
+
+      val model =
+        KMeans.fit(
+          global.extractCoreset(),
+          p.k,
+          p.nRestarts,
+          seed = p.seed
+        )
+
+      onModel(model)
+    }
+    .start()
+}
+\end{verbatim}
+
+Chaque micro-batch suit donc deux niveaux de traitement.
+
+D'abord, les observations du lot sont distribuées entre les partitions et un
+coreset du micro-batch est calculé à l'aide de \texttt{mergeCoresets}.
+
+Ensuite, le résumé obtenu est intégré à un état global conservé sur le driver.
+Un nouveau clustering peut alors être calculé à partir du résumé courant.
+
+Cette approche permet de maintenir un état de taille limitée entre les
+micro-batches. Elle ne doit cependant pas être présentée comme strictement
+équivalente à l'insertion directe de tous les points bruts dans un unique
+\texttt{BucketManager}. Le résumé d'un micro-batch contient déjà des points
+pondérés issus d'une réduction précédente. Cette différence constitue une
+limite de l'adaptation actuelle et doit être prise en compte dans
+l'interprétation de la version streaming.
+
+
+% ---------------------------------------------------------------------------
+\section{Réévaluation périodique et limites de l'état Spark}
+\label{sec:impl-requetes}
+% ---------------------------------------------------------------------------
+
+L'implémentation actuelle recalcule un modèle à la fin de chaque micro-batch
+grâce à \texttt{foreachBatch}. Elle fournit donc déjà une forme de
+réévaluation périodique du clustering.
+
+Elle ne reproduit toutefois pas l'ensemble de la variante à requêtes décrite
+dans la thèse de référence. Celle-ci prévoit notamment le calcul simultané de
+plusieurs valeurs de $k$, la conservation d'un état distinct pour chaque
+configuration et la possibilité d'interroger cet état depuis l'extérieur du
+job.
+
+Ces fonctionnalités ne sont pas implémentées dans notre version.
+
+Le calcul simultané de plusieurs valeurs de $k$ pourrait être ajouté en
+réutilisant le même coreset courant :
+
+\begin{verbatim}
+Seq(25, 50, 75)
+  .map { k =>
+    KMeans.fit(
+      coreset,
+      k
+    )
+  }
+\end{verbatim}
+
+En revanche, la fonctionnalité de \textit{Queryable State} utilisée par Flink
+n'a pas d'équivalent direct dans l'architecture retenue avec Spark Structured
+Streaming.
+
+Les résultats peuvent être transmis vers un système externe, un sink ou une
+fonction de callback, mais l'état interne du traitement n'est pas exposé de la
+même manière que dans Flink.
+
+
+% ---------------------------------------------------------------------------
+\section{Synthèse du portage Flink vers Spark}
+\label{sec:portage-flink-spark}
+% ---------------------------------------------------------------------------
+
+Le portage de StreamKM++ ne correspond pas à une traduction directe de chaque
+opérateur Flink. Certains mécanismes possèdent un équivalent proche dans
+Spark, tandis que d'autres doivent être réorganisés en fonction du modèle
+d'exécution du framework.
+
+Les principales différences observées sont les suivantes :
 
 \begin{itemize}
-    \item StreamKM++ séquentiel, utilisé comme référence interne ;
-    \item StreamKM++ distribué avec Apache Spark ;
-    \item K-Means de Spark MLlib, utilisé comme référence externe.
+
+    \item La construction des coresets locaux se transpose naturellement :
+    une partition Spark joue un rôle similaire à un subtask chargé de
+    consommer un sous-ensemble du flux.
+
+    \item La fusion des résumés est exprimée avec \texttt{treeReduce}, ce qui
+    permet d'organiser les opérations de combinaison sur plusieurs niveaux
+    plutôt que de centraliser immédiatement tous les résultats sur le driver.
+
+    \item La diffusion des centres utilisée pour calculer le coût est
+    directement prise en charge par les variables \texttt{broadcast} de
+    Spark.
+
+    \item Structured Streaming fournit explicitement les frontières des
+    micro-batches avec \texttt{foreachBatch}, ce qui modifie la manière de
+    représenter certaines étapes de contrôle du flux présentes dans
+    l'implémentation Flink.
+
+    \item Le partitionnement des données et les ressources de calcul peuvent
+    être étudiés séparément dans Spark. Le nombre de partitions détermine la
+    décomposition du traitement, tandis que le nombre de c\oe{}urs disponibles
+    détermine le parallélisme réellement exploitable.
+
+    \item Certaines fonctionnalités propres à Flink, notamment
+    \textit{Queryable State}, ne disposent pas d'un équivalent direct dans
+    l'architecture Spark retenue.
+
 \end{itemize}
 
-La comparaison avec MLlib ne cherche pas à établir une équivalence entre les deux méthodes. K-Means MLlib travaille directement sur les données distribuées, tandis que StreamKM++ construit d'abord un coreset de taille réduite. Cette comparaison permet surtout de vérifier que la réduction des données introduite par StreamKM++ ne conduit pas à une dégradation importante de la qualité du clustering.
-
-
-\section{Validation de l'implémentation}
-\label{sec:eval-validation}
-
-Avant les expériences sur Covertype, plusieurs tests élémentaires ont été réalisés afin de valider séparément les principales briques de l'implémentation. Cette étape vise notamment à détecter des erreurs qui pourraient produire des résultats numériquement plausibles tout en étant algorithmiquement incorrects.
-
-Les tests couvrent le calcul des distances, l'algorithme de Lloyd, la prise en compte des poids, la construction des coresets ainsi que la conservation de la masse lors des opérations de fusion.
-
-\begin{table}[ht]
-\centering
-\small
-\begin{tabular}{lll}
-\toprule
-\textbf{Test} & \textbf{Résultat attendu} & \textbf{Résultat obtenu} \\
-\midrule
-Distance euclidienne au carré
-    & $25$
-    & $25$ \\
-
-K-Means déterministe
-    & SSE $=4$
-    & SSE $=4$ \\
-
-K-Means pondéré
-    & centre $(2.5,0)$, SSE $=75$
-    & conforme \\
-
-Construction du coreset
-    & masse conservée
-    & conforme \\
-
-BucketManager
-    & masse conservée
-    & conforme \\
-
-Lecture de Covertype
-    & $54$ dimensions
-    & conforme \\
-\bottomrule
-\end{tabular}
-\caption{Validation des principales briques algorithmiques.}
-\label{tab:validation-implementation}
-\end{table}
-
-Le premier test vérifie directement le calcul de la distance euclidienne au carré sur un exemple dont le résultat est connu. Le deuxième utilise un petit ensemble de points permettant de déterminer manuellement le résultat attendu de l'algorithme de Lloyd. Le test pondéré vérifie que les poids associés aux points sont correctement intégrés dans le calcul des nouveaux centres et du coût.
-
-Les tests consacrés au coreset et au \texttt{BucketManager} vérifient une propriété importante de l'implémentation : la somme des poids des points du résumé doit correspondre au nombre total d'observations représentées. Les opérations successives de réduction et de fusion ne doivent donc pas entraîner de perte de masse.
-
-Enfin, un test de lecture du jeu Covertype vérifie que chaque observation est correctement transformée en un vecteur de 54 dimensions après exclusion de la variable de classe.
-
-Ces tests ne constituent pas à eux seuls une évaluation de la qualité du clustering à grande échelle. Ils permettent cependant de valider indépendamment plusieurs propriétés nécessaires avant de passer à l'expérimentation sur des données réelles.
-
-
-\section{Qualité du clustering sur Covertype}
-\label{sec:eval-qualite}
-
-Une première série d'expériences étudie la qualité du clustering produit par StreamKM++. Deux paramètres sont considérés : le nombre de clusters $k$ et la taille maximale $m$ du coreset.
-
-Les premières mesures présentées dans cette section utilisent un sous-ensemble de 20\,000 observations de Covertype. Elles servent principalement à valider le protocole et à comparer le comportement des différentes implémentations dans des conditions identiques.
-
-
-\subsection{Influence du nombre de clusters}
-\label{sec:eval-k}
-
-La première expérience étudie l'évolution du coût lorsque le nombre de clusters augmente. Les valeurs suivantes sont considérées :
-
-\[
-k \in \{10,20,30,40,50\}.
-\]
-
-Pour chaque configuration, la taille du coreset est définie relativement au nombre de clusters selon :
-
-\[
-m = 200k.
-\]
-
-Le tableau~\ref{tab:quality-k} présente les coûts obtenus avec StreamKM++ séquentiel, StreamKM++ distribué avec Spark et K-Means de Spark MLlib.
-
-\begin{table}[ht]
-\centering
-\small
-\begin{tabular}{rrrr}
-\toprule
-\textbf{$k$}
-& \textbf{StreamKM++ séquentiel}
-& \textbf{StreamKM++ Spark}
-& \textbf{MLlib} \\
-\midrule
-10 & $10.029 \times 10^{9}$ & $10.073 \times 10^{9}$ & $10.019 \times 10^{9}$ \\
-20 & $5.792 \times 10^{9}$  & $5.789 \times 10^{9}$  & $5.724 \times 10^{9}$ \\
-30 & $4.293 \times 10^{9}$  & $4.335 \times 10^{9}$  & $4.289 \times 10^{9}$ \\
-40 & $3.535 \times 10^{9}$  & $3.531 \times 10^{9}$  & $3.508 \times 10^{9}$ \\
-50 & $3.028 \times 10^{9}$  & $3.028 \times 10^{9}$  & $3.043 \times 10^{9}$ \\
-\bottomrule
-\end{tabular}
-\caption{Influence du nombre de clusters sur la SSE pour 20\,000 observations de Covertype.}
-\label{tab:quality-k}
-\end{table}
-
-Le premier comportement observable est la diminution nette de la SSE lorsque $k$ augmente. Ce résultat est attendu : disposer d'un plus grand nombre de centres permet de représenter plus finement la distribution des observations et réduit donc la distance entre chaque point et son centre le plus proche.
-
-Les résultats obtenus par les versions séquentielle et distribuée de StreamKM++ sont également très proches. Sur les configurations étudiées, les différences restent faibles par rapport au niveau global du coût. Cela constitue une première indication que la construction locale des coresets sur les partitions Spark suivie de leur fusion ne dégrade pas fortement la qualité du clustering.
-
-Les valeurs obtenues avec MLlib restent elles aussi du même ordre de grandeur. Selon la valeur de $k$, MLlib peut produire un coût légèrement inférieur ou légèrement supérieur à celui de StreamKM++. Il n'apparaît donc pas, sur cette expérience, de dégradation systématique importante liée à l'utilisation du coreset.
-
-
-\subsection{Influence de la taille du coreset}
-\label{sec:eval-m}
-
-La deuxième expérience étudie l'influence du paramètre $m$, qui contrôle la taille maximale du coreset. Le nombre de clusters est fixé à :
-
-\[
-k=25,
-\]
-
-et quatre tailles de coreset sont étudiées :
-
-\[
-m \in \{1000,5000,10000,20000\}.
-\]
-
-Les résultats sont présentés dans le tableau~\ref{tab:quality-m}.
-
-\begin{table}[ht]
-\centering
-\small
-\begin{tabular}{rrr}
-\toprule
-\textbf{$m$}
-& \textbf{StreamKM++ séquentiel}
-& \textbf{StreamKM++ Spark} \\
-\midrule
-1\,000  & $5.061 \times 10^{9}$ & $5.071 \times 10^{9}$ \\
-5\,000  & $4.958 \times 10^{9}$ & $4.958 \times 10^{9}$ \\
-10\,000 & $4.847 \times 10^{9}$ & $4.847 \times 10^{9}$ \\
-20\,000 & $4.967 \times 10^{9}$ & $4.967 \times 10^{9}$ \\
-\bottomrule
-\end{tabular}
-\caption{Influence de la taille du coreset pour $k=25$ sur 20\,000 observations de Covertype.}
-\label{tab:quality-m}
-\end{table}
-
-Entre $m=1000$ et $m=10000$, l'augmentation de la taille du coreset s'accompagne d'une diminution du coût. Ce comportement est cohérent avec le rôle du coreset : un résumé plus grand peut conserver davantage d'information sur la distribution des données originales et fournir ainsi une approximation plus précise du problème de clustering.
-
-Cette tendance n'est toutefois pas strictement monotone. Pour $m=20000$, le coût observé augmente par rapport à $m=10000$. Cette observation ne permet pas de conclure qu'une augmentation de la taille du coreset dégrade la qualité. StreamKM++ ainsi que l'initialisation k-means++ comportent des étapes aléatoires, ce qui peut conduire à des centres différents entre deux exécutions.
-
-Une analyse plus rigoureuse de l'influence de $m$ nécessiterait donc plusieurs répétitions avec différentes graines aléatoires et la comparaison des distributions de coûts obtenues, par exemple au moyen de leur moyenne et de leur écart-type.
-
-
-\subsection{Comparaison avec Spark MLlib}
-\label{sec:eval-mllib}
-
-Spark MLlib est utilisé comme référence afin de situer les coûts obtenus par StreamKM++ par rapport à une implémentation de K-Means directement intégrée à Spark.
-
-Les deux approches ne suivent cependant pas exactement le même processus. MLlib effectue le clustering directement sur les données distribuées, tandis que StreamKM++ remplace progressivement les observations par un ensemble pondéré de taille limitée avant d'exécuter le clustering final.
-
-La comparaison porte donc essentiellement sur le coût final obtenu sur les données originales. Les résultats du tableau~\ref{tab:quality-k} montrent que les coûts obtenus par StreamKM++ et MLlib restent proches sur les configurations testées. L'utilisation d'un coreset permet ainsi de réduire le nombre de points manipulés lors de l'étape finale de clustering sans entraîner, sur ces premières expériences, une augmentation importante de la SSE.
-
-Cette observation doit néanmoins être complétée par les expériences sur le jeu Covertype complet et par les mesures de temps d'exécution. L'intérêt principal de StreamKM++ ne réside en effet pas uniquement dans la qualité du résultat, mais dans sa capacité à conserver un résumé de taille contrôlée lorsque le volume de données augmente.
-
-
-\section{Scalabilité de l'implémentation Spark}
-\label{sec:eval-scalabilite}
-
-Après avoir étudié la qualité des clusters obtenus, l'évaluation porte sur le comportement de l'implémentation distribuée lorsque la quantité de données et le degré de parallélisme augmentent.
-
-Deux dimensions sont considérées. La première consiste à faire varier le nombre d'observations traitées, par exemple avec les volumes suivants :
-
-\[
-n \in
-\{20\,000,\,
-50\,000,\,
-100\,000,\,
-200\,000,\,
-581\,012\}.
-\]
-
-La seconde consiste à faire varier le nombre de partitions Spark :
-
-\[
-p \in \{1,2,4,8,16\}.
-\]
-
-Pour chaque configuration, le temps d'exécution du pipeline distribué est mesuré dans des conditions identiques. L'objectif est d'étudier d'une part l'évolution du coût de calcul lorsque le volume augmente et, d'autre part, la capacité de la construction locale des coresets et de leur fusion à exploiter le parallélisme disponible.
-
-Les mesures doivent également permettre de distinguer le gain obtenu par le calcul distribué du surcoût introduit par Spark, notamment l'ordonnancement des tâches, la sérialisation et la fusion des résultats intermédiaires.
-
-% À remplacer par les résultats expérimentaux une fois les mesures
-% de scalabilité terminées.
-
-
-\section{Optimisation du noyau local}
-\label{sec:eval-jmh}
-
-En complément des expériences portant directement sur StreamKM++ distribué, une optimisation de la représentation mémoire des points a été étudiée sur les couches \texttt{core} et \texttt{coreset}. Cette expérimentation est indépendante de Spark et vise uniquement à réduire le coût des opérations locales fréquemment exécutées par l'algorithme.
-
-\subsection{Hypothèse}
-
-L'implémentation initiale utilise une représentation de type \emph{Array of Structures} (AoS), dans laquelle les points sont stockés dans un \texttt{Array[Point]} et chaque objet \texttt{Point} contient son propre \texttt{Array[Double]}.
-
-Une représentation de type \emph{Structure of Arrays} (SoA) a été expérimentée avec la classe \texttt{PointsSoA}. Les coordonnées sont stockées de manière contiguë dans un \texttt{DoubleBuffer} construit à partir d'un \texttt{ByteBuffer.allocateDirect}.
-
-L'hypothèse était qu'une meilleure localité mémoire pouvait réduire le coût des accès aux coordonnées, notamment dans les opérations fréquemment appelées telles que \texttt{Distance.sqdist}, la recherche du centre le plus proche ou la construction du coreset.
-
-
-\subsection{Protocole JMH}
-
-Les deux représentations ont été comparées avec JMH~1.37 dans une JVM isolée. Les benchmarks utilisent cinq itérations de warmup, trente itérations de mesure et un fork. Le même JDK est utilisé pour les deux versions.
-
-Six opérations ont été isolées :
-
-\begin{itemize}
-    \item \texttt{sqdist} ;
-    \item \texttt{nearest} ;
-    \item \texttt{BucketManager.insertAll} ;
-    \item \texttt{CoresetTree.build} ;
-    \item \texttt{KMeans.lloyd} ;
-    \item le pipeline local complet.
-\end{itemize}
-
-Ces microbenchmarks ne mesurent pas les performances d'un job Spark. Leur objectif est uniquement d'isoler le coût des principales opérations du noyau algorithmique.
-
-
-\subsection{Résultats}
-
-Contrairement à l'hypothèse initiale, la variante SoA reposant sur un buffer hors tas est plus lente que la représentation AoS sur l'ensemble des benchmarks réalisés.
-
-\begin{table}[ht]
-\centering
-\small
-\begin{tabular}{lll}
-\toprule
-\textbf{Benchmark}
-& \textbf{Nature}
-& \textbf{Écart SoA vs AoS} \\
-\midrule
-\texttt{sqdist}
-    & calcul de distance
-    & $+46$ à $+77\,\%$ \\
-
-\texttt{nearest}
-    & recherche de centre
-    & $+45$ à $+51\,\%$ \\
-
-\texttt{insertAll}
-    & manipulation du buffer
-    & $+32$ à $+50\,\%$ \\
-
-\texttt{CoresetTree.build}
-    & construction du coreset
-    & $+36$ à $+59\,\%$ \\
-
-\texttt{lloyd}
-    & clustering
-    & $+20$ à $+30\,\%$ \\
-
-\texttt{fullPipeline}
-    & pipeline complet
-    & $+15$ à $+21\,\%$ \\
-\bottomrule
-\end{tabular}
-\caption{Écart relatif du temps moyen entre la représentation SoA hors tas et la représentation AoS.}
-\label{tab:jmh-soa-vs-aos}
-\end{table}
-
-L'écart est particulièrement important pour les opérations élémentaires telles que \texttt{sqdist} et \texttt{nearest}. Il devient plus faible lorsque le benchmark inclut davantage de calculs indépendants de la représentation mémoire, comme dans \texttt{lloyd} ou dans le pipeline complet.
-
-Ces résultats indiquent que, dans l'implémentation testée, le bénéfice potentiel de la disposition contiguë des coordonnées ne compense pas le coût d'accès associé à l'utilisation de \texttt{DoubleBuffer}. Les tableaux primitifs de la JVM bénéficient également d'optimisations importantes de HotSpot, notamment sur les accès répétés dans les boucles de calcul.
-
-Ce résultat ne permet donc pas de conclure que le principe d'une représentation SoA est inadapté à StreamKM++. Il montre uniquement que la variante expérimentée avec \texttt{ByteBuffer.allocateDirect} et \texttt{DoubleBuffer} n'apporte pas d'amélioration dans ce contexte.
-
-Une variante reposant sur un tableau \texttt{Array[Double]} plat, conservé sur le tas, pourrait permettre de distinguer l'effet de la disposition SoA de celui du stockage hors tas. Cette expérimentation supplémentaire n'a toutefois pas été poursuivie dans le cadre du projet.
-
-Au vu des résultats obtenus, cette optimisation n'a pas été retenue comme élément central de l'implémentation finale.
-```
+Ces différences montrent que le portage ne consiste pas seulement à remplacer
+les API Flink par leurs équivalents Spark. Il nécessite également d'adapter le
+dataflow et la gestion de l'état au modèle d'exécution du framework cible.
+Les conséquences de ces choix sont étudiées expérimentalement au
+chapitre~\ref{ch:evaluation}.

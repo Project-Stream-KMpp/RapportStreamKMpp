@@ -1,4 +1,4 @@
-% !TeX root = main.tex
+% ch1_introduction.tex
 \chapter{Introduction}
 \label{ch:introduction}
 
@@ -12,47 +12,3 @@ Le travail est organisé autour de trois objectifs. Le premier consiste à impl�
 
 L'architecture retenue sépare la logique algorithmique de l'orchestration distribuée. Les packages \texttt{streamkm.core} et \texttt{streamkm.coreset} contiennent les composants indépendants de Spark, tandis que \texttt{streamkm.spark} assure leur exécution distribuée. Cette organisation permet de vérifier séparément la correction de l'algorithme avant d'évaluer son comportement dans un environnement Spark.
 
-
-\paragraph{Objet de ce rapport.} Bitsakis (2018) implémente StreamKM++ dans
-Apache Flink et l'évalue de façon approfondie (chapitres 4 et 5 de sa
-thèse). Notre travail consiste à \textbf{porter cette implémentation vers
-Apache Spark}, dans le cadre du cours de déploiement ML à grande échelle de
-ce M2. Ce portage n'est pas une simple traduction syntaxique : Flink et
-Spark reposent sur des modèles d'exécution différents (état par
-\emph{subtask} adressable vs. RDD immuables et micro-batch), et une partie
-du travail intéressant de ce rapport consiste précisément à identifier ce
-qui se traduit directement, ce qui demande une réinterprétation, et ce qui
-n'a tout simplement pas d'équivalent côté Spark (chapitre~\ref{ch:implementation},
-§\ref{sec:portage-flink-spark}).
-
-\paragraph{Méthode.} Nous avons suivi la même progression que la thèse de
-référence, dans le même ordre : comprendre la théorie avant d'écrire du
-code (chapitre~\ref{ch:algorithmes}), décrire le modèle d'exécution cible
-avant de l'utiliser (chapitre~\ref{ch:spark}), implémenter opérateur par
-opérateur en partant d'une version simple avant d'ajouter des raffinements
-(chapitre~\ref{ch:implementation}), et enfin valider la \emph{qualité} du
-clustering avant de mesurer sa \emph{scalabilité}
-(chapitre~\ref{ch:evaluation}) --- mesurer un speedup sur un algorithme dont
-le résultat serait faux n'aurait aucun sens. Cet ordre n'est pas seulement
-une méthode de travail : c'est aussi le plan de ce rapport.
-
-\paragraph{Architecture logicielle.} Le code est organisé en trois couches
-strictement séparées, une contrainte de conception que nous avons tenue tout
-au long du projet :
-
-\begin{itemize}
-  \item \texttt{streamkm.core} --- $k$-means, $k$-means++, distance
-    euclidienne au carré. Pur Scala, aucune dépendance.
-  \item \texttt{streamkm.coreset} --- l'arbre de coreset et la technique
-    merge-and-reduce. Pur Scala, sérialisable, testable sans JVM Spark.
-  \item \texttt{streamkm.spark} --- l'orchestration Spark (RDD,
-    \texttt{treeReduce}, Structured Streaming). Aucune logique
-    algorithmique n'y vit : cette couche ne fait que distribuer des appels
-    aux deux précédentes.
-\end{itemize}
-
-Cette séparation permet de tester et de faire du micro-benchmarking sur les
-deux premières couches indépendamment de tout cluster Spark
-(chapitre~\ref{ch:evaluation}, §\ref{sec:eval-scalabilite}), et elle rend
-visible, dans le code même, la frontière entre « ce qui est StreamKM++ » et
-« ce qui est Spark ».
