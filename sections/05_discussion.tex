@@ -1,0 +1,94 @@
+\section{Discussion : points forts et points faibles}
+\label{sec:discussion}
+
+\subsection{Points forts}
+
+\begin{itemize}
+  \item \textbf{Architecture fidèle à la référence séquentielle.} La suite
+        de tests (\code{StreamKMSpec}, section~\ref{sec:tests}) vérifie que
+        la version distribuée reproduit le coût de la référence séquentielle
+        à une tolérance dérivée près (section~\ref{sec:tolerance-derivation}),
+        et non arbitrairement choisie, avec une marge de sécurité confortable
+        entre l'écart théorique et l'écart réellement observé sur les
+        données de test.
+  \item \textbf{Remplacement du goulot d'étranglement identifié par la
+        thèse.} La fusion séquentielle des coresets partiels
+        (\code{FlatMapToFinalCoreset}), que la thèse \cite{bitsakis2018}
+        identifie elle-même comme le facteur qui plafonne le
+        \emph{speedup} au-delà de 8 cœurs (section 5.3.1), est remplacée par
+        une réduction en arbre (\code{treeReduce}) dans notre portage
+        (section~\ref{sec:implementation}).
+  \item \textbf{Indépendance de l'aléa garantie à chaque niveau de fusion.}
+        La graine utilisée pour reconstruire un coreset fusionné
+        (\code{BucketManager.merge}) combine celles des deux opérandes à
+        chaque niveau de fusion, et pas seulement au premier niveau
+        (section~\ref{sec:implementation}). Ce point, une tolérance de test
+        dérivée plutôt que choisie ad hoc, et un test dédié à l'état
+        maintenu entre micro-batches (le scénario le plus à risque de
+        double-comptage ou de perte de masse), sont tous les trois couverts
+        par la suite de tests (section~\ref{sec:tests}).
+  \item \textbf{Découplage partitions/cœurs, impossible dans Flink.} Le
+        modèle Spark distingue explicitement le nombre de partitions du
+        nombre de cœurs disponibles, ce que Flink ne permet pas (un seul
+        paramètre \emph{parallelism} contrôle les deux). Ce découplage
+        permettra, une fois les expériences de scalabilité menées
+        (section~\ref{sec:experiments}), de reproduire et vérifier
+        directement l'explication proposée par la thèse pour la légère
+        amélioration de qualité observée à parallélisme croissant (plus de
+        partitions égale plus de listes de buckets indépendantes).
+  \item \textbf{Suite de tests couvrant les scénarios à risque, pas
+        seulement le cas nominal.} Au-delà des invariants de base
+        (conservation de la masse, monotonie du coût), la suite inclut un
+        test de non-régression distribué/séquentiel sur données réelles à
+        grande échelle et un test dédié au risque de double-comptage entre
+        micro-batches (section~\ref{sec:tests}).
+\end{itemize}
+
+\subsection{Points faibles et limitations assumées}
+
+\begin{itemize}
+  \item \textbf{Asymétrie de protocole dans la comparaison à MLlib.} Notre
+        \code{KMeans.fit} exécute 5 redémarrages k-means++ indépendants et
+        garde le meilleur ; \code{ml.clustering.KMeans} de MLlib ne propose
+        pas d'équivalent \og best of $N$\fg{} (il repose sur son propre
+        mécanisme d'initialisation interne, k-means$\|$, l'algorithme
+        d'initialisation parallèle de Bahmani et al.). Nous n'avons pas
+        cherché à égaliser artificiellement les deux protocoles pour les
+        besoins de la comparaison : ce serait dénaturer le comportement
+        standard de MLlib. Cette asymétrie doit néanmoins être gardée à
+        l'esprit lors de la lecture des résultats de l'expérience 1
+        (section~\ref{sec:experiments}) : l'écart mesuré entre les deux
+        méthodes n'isolera pas seulement l'effet du coreset.
+  \item \textbf{Aucune preuve formelle que le coreset tree produit un vrai
+        $\varepsilon$-coreset.} La thèse elle-même reconnaît ce point
+        (\cite{bitsakis2018}, section 2.3.4) : contrairement à
+        l'\emph{AdaptiveCoreset} (théorème 2.1, dont la borne n'est pas
+        exploitable numériquement), aucune borne d'erreur fermée n'existe
+        pour la structure d'arbre que nous implémentons. Notre tolérance de
+        test (section~\ref{sec:tolerance-derivation}) est donc une
+        estimation dérivée d'une calibration empirique à un seul niveau,
+        composée sur plusieurs niveaux, et non un résultat prouvé de bout en
+        bout. C'est une limite qu'il convient d'assumer plutôt que de
+        présenter comme une garantie.
+  \item \textbf{Pas d'équivalent du \emph{Queryable State} de Flink.} La
+        thèse expose un mécanisme permettant d'interroger l'état interne
+        (les centres courants) depuis l'extérieur du job en temps réel
+        (\cite{bitsakis2018}, section 4.3.1). Spark n'offre pas de mécanisme
+        directement comparable pour un état inter-micro-batch adressable de
+        l'extérieur : c'est un avantage architectural réel de Flink que
+        notre portage ne reproduit pas.
+  \item \textbf{Limitation d'environnement, pas algorithmique.} Un test
+        d'intégration bout-en-bout de \code{StreamKMPlusPlus.run} est
+        actuellement désactivé sur la machine de développement (Windows,
+        absence de \code{winutils.exe}), voir section~\ref{sec:tests}. Cela
+        n'affecte pas la validité de l'algorithme, seulement la possibilité
+        de l'exercer via ce test précis sur cette machine précise.
+  \item \textbf{Scalabilité non encore quantifiée dans ce document.} Comme
+        indiqué en section~\ref{sec:experiments}, aucune mesure de temps
+        d'exécution n'est disponible au moment de la rédaction : nous ne
+        pouvons donc pas encore confirmer ou infirmer, sur notre propre
+        implémentation, l'observation de la thèse selon laquelle la fusion
+        séquentielle plafonne le \emph{speedup} au-delà de 8 cœurs. Seule
+        l'amélioration architecturale (remplacement par \code{treeReduce})
+        est établie qualitativement à ce stade, pas encore chiffrée.
+\end{itemize}

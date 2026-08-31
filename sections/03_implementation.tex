@@ -1,0 +1,216 @@
+\section{Implémentation et commentaire du code}
+\label{sec:implementation}
+
+Le code est organisé en quatre couches, avec une règle stricte : les couches
+\code{core} et \code{coreset} ne connaissent pas Spark (pur Scala,
+sérialisable, testable sans JVM Spark) ; toute la logique Spark vit dans
+\code{streamkm.spark}, sous forme d'orchestration pure : aucun calcul
+algorithmique n'y est dupliqué.
+
+\begin{center}
+\begin{tabular}{@{}ll@{}}
+\toprule
+Package & Contenu \\
+\midrule
+\code{streamkm.core}    & \code{Point}, \code{Distance}, \code{KMeans} (seeding, Lloyd, coût) \\
+\code{streamkm.coreset} & \code{CoresetTree} (coreset tree), \code{BucketManager} (merge-and-reduce) \\
+\code{streamkm.spark}   & \code{StreamKMPlusPlus} (portage Spark), \code{CostEvaluator} \\
+\code{streamkm.experiments} & \code{QualityMetrics} (harnais d'expériences, section~\ref{sec:experiments}) \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Structure de données : le point pondéré}
+
+Toute la chaîne repose sur une seule structure de données, \code{Point},
+volontairement minimale : un tableau de coordonnées et un poids (1.0 pour un
+point brut du flux, la masse représentée pour un point de coreset).
+
+\lstinputlisting[
+  language=Scala,
+  firstline=20, lastline=27,
+  caption={\code{Point} : structure de données centrale (\code{streamkm/core/Point.scala})}
+]{../StreamKMpp/src/main/scala/streamkm/core/Point.scala}
+
+\subsection{Seeding $D^2$ pondéré}
+
+\lstinputlisting[
+  language=Scala,
+  firstline=65, lastline=96,
+  caption={\code{KMeans.seedPlusPlus} : seeding k-means++ pondéré}
+]{../StreamKMpp/src/main/scala/streamkm/core/KMeans.scala}
+
+\paragraph{Commentaire.} La ligne 73 tire le premier centre
+\emph{proportionnellement au poids} plutôt qu'uniformément. Sur des points
+bruts (poids uniformément égal à 1), les deux tirages coïncident exactement ;
+mais dans le pipeline complet de StreamKM++, le seeding $D^2$ n'est
+\emph{jamais} appliqué à des points bruts : il s'applique toujours au
+coreset final, dont les poids sont très hétérogènes (la masse représentée
+par chaque point). Un tirage uniforme y biaiserait l'initialisation vers les
+régions les moins denses du coreset. Les lignes 77 à 79 pré-calculent la
+distance de chaque point au premier centre (\code{closest}), mise à jour
+incrémentalement à chaque nouveau centre (lignes 87 à 92) : c'est ce qui
+donne la complexité $O(n\cdot k\cdot d)$ annoncée plutôt que
+$O(n\cdot k^2\cdot d)$.
+
+\subsection{Lloyd pondéré et son invariant de monotonie}
+
+\lstinputlisting[
+  language=Scala,
+  firstline=141, lastline=178,
+  caption={\code{KMeans.lloyd} : boucle principale (extrait), pondération et invariant}
+]{../StreamKMpp/src/main/scala/streamkm/core/KMeans.scala}
+
+\paragraph{Commentaire.} La ligne 149 accumule le coût \emph{avant} mise à
+jour des centres (\code{currCost}), et non après : c'est cette quantité
+précise dont la décroissance prouve la convergence de Lloyd (l'étape
+d'affectation ne peut que diminuer le coût pour des centres fixés, et l'étape
+de mise à jour ne peut que le diminuer pour une affectation fixée).
+L'assertion de la ligne 173 rend cet invariant \emph{exécutable} : toute
+régression future qui casserait la pondération (par exemple un retour
+accidentel à une moyenne non pondérée) ferait échouer cette assertion en
+mode debug plutôt que de produire silencieusement un résultat faux.
+
+\subsection{Coreset tree : la descente pondérée par le coût}
+
+\lstinputlisting[
+  language=Scala,
+  firstline=114, lastline=126,
+  caption={\code{CoresetTree.descend} : choix de la feuille à scinder}
+]{../StreamKMpp/src/main/scala/streamkm/coreset/CoresetTree.scala}
+
+\paragraph{Commentaire.} La descente (ligne 121) compare un tirage aléatoire
+au \emph{coût cumulé} du sous-arbre gauche (\code{node.left.cost}), jamais à
+sa masse. Le cas \code{total > 0.0} faux (ligne 120) est une garde
+défensive : si le coût du nœud est nul, tous ses points sont confondus avec
+leur représentant et aucun choix n'a d'importance ; ce cas se produit
+réellement sur des données très redondantes (voir le test \emph{"gère un
+ensemble de points tous identiques"} de \code{CoresetSpec}).
+
+\lstinputlisting[
+  language=Scala,
+  firstline=54, lastline=64,
+  caption={\code{CoresetTree.build} : amorçage (extrait)}
+]{../StreamKMpp/src/main/scala/streamkm/coreset/CoresetTree.scala}
+
+La ligne 56 est la garantie structurelle centrale de toute la structure :
+si l'ensemble d'entrée tient déjà dans le budget \code{m}, il \emph{est} son
+propre coreset. C'est cette invariance de la masse totale que testent en
+priorité les tests de la couche \code{coreset} (section~\ref{sec:tests}).
+
+\subsection{Merge-and-reduce : consommation du flux par cascade de buckets}
+
+\lstinputlisting[
+  language=Scala,
+  firstline=52, lastline=91,
+  caption={\code{BucketManager.insert} : algorithme 2.5 (merge-and-reduce)}
+]{../StreamKMpp/src/main/scala/streamkm/coreset/BucketManager.scala}
+
+\paragraph{Commentaire.} Le déroulé en trois cas (ligne 62 à 90) suit
+exactement la prose de la thèse (section 2.3.4) : si le bucket $B_1$ est
+vide (ligne 64), on s'y contente de déplacer $B_0$ sans aucune réduction ;
+$B_1$ contient alors $m$ points \emph{bruts} qui représentent bien $2^0\cdot
+m$ points du flux, sans perte d'information. Si $B_1$ est plein (ligne 68),
+la boucle \code{while} des lignes 76 à 87 implémente la cascade de
+fusions-réductions : à chaque itération, on reconstruit un coreset de taille
+$m$ (ligne 77, \code{CoresetTree.build}) à partir de l'union du niveau
+courant et du niveau précédent, et on ne s'arrête que lorsqu'un niveau libre
+est trouvé (ligne 79). L'assertion de la ligne 89
+(\code{checkInvariants}), active uniquement avec le flag JVM \code{-ea},
+vérifie après chaque insertion que la structure de buckets respecte bien
+ses invariants de taille.
+
+\subsection{Fusion de deux \code{BucketManager} : le \code{combOp} du portage Spark}
+
+\lstinputlisting[
+  language=Scala,
+  firstline=154, lastline=166,
+  caption={\code{BucketManager.merge} : fusion de deux structures indépendantes}
+]{../StreamKMpp/src/main/scala/streamkm/coreset/BucketManager.scala}
+
+\paragraph{Commentaire.} La ligne 162 utilise le générateur aléatoire de
+\code{out}, l'objet construit avec la graine combinée \code{seed \^{}
+other.seed} (ligne 157), et non celui de \code{this} ni de \code{other} :
+ainsi, à chaque niveau de \code{treeReduce}, la construction du coreset
+fusionné combine réellement la graine des deux opérandes de ce niveau
+précis, plutôt que de ne dépendre que d'un seul d'entre eux. Cette propriété
+est nécessaire pour que l'aléa reste indépendant à tous les niveaux d'une
+fusion distribuée, et pas seulement au premier.
+
+\subsection{Portage Spark : pourquoi \code{treeReduce} plutôt que \code{treeAggregate}}
+
+\lstinputlisting[
+  language=Scala,
+  firstline=86, lastline=93,
+  caption={\code{StreamKMPlusPlus.mergeCoresets} : fusion distribuée en arbre}
+]{../StreamKMpp/src/main/scala/streamkm/spark/StreamKMPlusPlus.scala}
+
+\paragraph{Commentaire.} Une alternative plus directe consisterait à
+utiliser \code{RDD.treeAggregate(zeroValue)(seqOp, combOp, depth)} avec un
+\code{zeroValue} unique partagé entre toutes les partitions. Nous nous en
+écartons délibérément : \code{treeAggregate} clone ce \code{zeroValue} pour
+chaque tâche, mais avec le \emph{même} état interne du générateur aléatoire
+pour toutes les partitions, ce qui casse l'indépendance de graine par
+partition nécessaire à l'expérience de scalabilité qui fait varier le
+nombre de partitions à données fixes (sans que ce changement ne se confonde
+avec un simple changement de graine). Nous construisons donc explicitement
+un \code{BucketManager} par partition avec une graine dérivée de son indice
+(\code{p.seed + idx}, ligne 88), puis les fusionnons par \code{treeReduce}
+(ligne 92), qui offre la même structure de réduction en arbre bornée en
+profondeur, sans ce défaut.
+
+\subsection{Instrument de mesure : \code{CostEvaluator}}
+
+\lstinputlisting[
+  language=Scala,
+  firstline=43, lastline=48,
+  caption={\code{CostEvaluator.cost} : coût distribué, sans logique dupliquée}
+]{../StreamKMpp/src/main/scala/streamkm/spark/CostEvaluator.scala}
+
+\paragraph{Commentaire.} Cette fonction ne réimplémente aucune formule : elle
+délègue entièrement à \code{KMeans.cost} (couche \code{core}, déjà testée),
+appelée une fois par partition sur les centres reçus par diffusion
+(\emph{broadcast}, implicite via la fermeture Scala capturant
+\code{bcCenters}), puis somme les résultats partiels par un
+\code{treeReduce}. Contrairement à la fusion de coresets, cette agrégation
+est une simple somme, associative et exacte à la précision flottante près :
+aucune composition d'erreur multiplicative n'intervient ici, à la différence
+de section~\ref{sec:algorithms} et de l'analyse de tolérance en
+section~\ref{sec:experiments}.
+
+\subsection{Validation : suite de tests}
+\label{sec:tests}
+
+L'ensemble du code présenté ci-dessus est couvert par une suite de tests
+ScalaTest exécutée via \code{sbt test} (code source complet en
+Annexe~\ref{sec:appendix-code}) :
+
+\begin{center}
+\begin{tabular}{@{}llc@{}}
+\toprule
+Suite & Couverture & Tests \\
+\midrule
+\code{KMeansSpec}        & seeding, Lloyd, pondération, monotonie du coût & 7 \\
+\code{CoresetSpec}       & coreset tree, merge-and-reduce, conservation de la masse & 14 \\
+\code{StreamKMSpec}      & non-régression distribué/séquentiel, état multi-batch & 7 (1 ignoré\footnotemark) \\
+\code{CostEvaluatorSpec} & coût distribué vs. séquentiel, invariance au partitionnement & 4 \\
+\midrule
+\textbf{Total} & & \textbf{32 (31 exécutés, 1 ignoré)} \\
+\bottomrule
+\end{tabular}
+\end{center}
+\footnotetext{Un test d'intégration bout-en-bout de \code{StreamKMPlusPlus.run}
+via \code{MemoryStream} est marqué \code{ignore} sur la machine de
+développement (Windows) : Structured Streaming y échoue lors de l'écriture
+des métadonnées de checkpoint faute de \code{winutils.exe}/\code{HADOOP\_HOME},
+une limitation d'environnement sans rapport avec la correction de
+l'algorithme. Il est actif tel quel sous Linux/macOS ou dans un conteneur
+Docker.}
+
+Le test le plus significatif de \code{StreamKMSpec} compare le coût d'un
+clustering obtenu en distribuant les données sur 8 partitions Spark à celui
+d'une exécution séquentielle de référence sur les mêmes données, avec une
+tolérance \emph{dérivée} (et non choisie arbitrairement) de la loi de
+composition multiplicative des coresets présentée en
+section~\ref{sec:solution} ; le détail du calcul est donné en
+section~\ref{sec:experiments}.

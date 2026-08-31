@@ -1,0 +1,112 @@
+\section{Évaluation expérimentale}
+\label{sec:experiments}
+
+\subsection{Jeu de données}
+
+Le jeu de données utilisé pour évaluer la qualité du clustering est
+\textbf{Covertype} (UCI Machine Learning Repository) : 581\,012 observations,
+54 attributs (dont les 10 premiers, continus, sont utilisés comme
+coordonnées pour le calcul de distance). C'est un jeu de données standard
+pour évaluer des algorithmes de clustering à l'échelle, suffisamment grand
+pour rendre visible l'effet de la distribution sur plusieurs partitions
+Spark.
+
+\subsection{Méthodologie : harnais \code{QualityMetrics}}
+
+Le harnais \code{streamkm.experiments.QualityMetrics} (code complet en
+Annexe~\ref{sec:appendix-code}) exécute et compare trois méthodes sur les
+mêmes données :
+\begin{itemize}
+  \item \textbf{Séquentiel} : un unique \code{BucketManager}, tout le flux
+        consommé point par point, référence de qualité ;
+  \item \textbf{Spark distribué} : \code{StreamKMPlusPlus.mergeCoresets},
+        données réparties sur plusieurs partitions, fusion en arbre
+        (section~\ref{sec:implementation}) ;
+  \item \textbf{MLlib} : \code{org.apache.spark.ml.clustering.KMeans}
+        appliqué directement aux données brutes, comme référence externe
+        n'utilisant aucune notion de coreset.
+\end{itemize}
+Chaque exécution est répétée (\code{nRepeats}) avec des graines différentes
+et le coût (somme pondérée des distances au carré aux centres,
+\code{CostEvaluator.cost}) est consigné en CSV
+(\code{ResultRow(dataset, method, k, m, run, seed, cost)}) pour permettre une
+analyse statistique plutôt qu'une lecture d'une seule exécution.
+
+Pour la méthode MLlib, le paramètre \code{m} n'a pas de signification
+(MLlib ne construit pas de coreset) ; il est reporté tel quel dans le CSV
+pour garder un schéma de sortie uniforme entre les trois méthodes, avec une
+valeur conventionnelle plutôt qu'une absence de valeur.
+
+\subsection{Expérience 1 : variation de $k$ (nombre de clusters)}
+
+Cette expérience fait varier $k$ (nombre de clusters demandé) à $m$ fixé, et
+compare le coût obtenu par les trois méthodes sur Covertype, pour quantifier
+l'écart de qualité introduit par la distribution Spark et par
+l'approximation coreset, par rapport à MLlib appliqué aux données brutes.
+
+\todo[inline]{TODO : cette expérience n'a pas encore été exécutée par
+l'auteur de ce rapport sur la machine de développement (seule une commande
+de lancement a été validée sur un échantillon réduit). À exécuter avec
+\code{sbt "runMain streamkm.experiments.QualityMetrics --dataset covertype
+--sweep k --values 10,20,30,40,50 --repeats 5"}, puis reporter ici le tableau
+de coûts par méthode et par valeur de $k$, ainsi qu'un graphique
+correspondant, avant soumission finale.}
+
+\subsection{Expérience 2 : variation de $m$ (taille du coreset)}
+
+Cette expérience fait varier $m$ (taille du coreset) à $k$ fixé, pour
+observer le compromis entre la taille du résumé maintenu et la qualité du
+clustering obtenu.
+
+\todo[inline]{TODO : seule une exécution préliminaire sur un échantillon de
+2\,000 points est disponible à ce stade
+(\code{results/quality\_m\_sweep\_covertype.csv}), insuffisante pour tirer
+une conclusion à l'échelle de Covertype complet. Une exécution complète sur
+les 581\,012 points doit être relancée avant la soumission finale.}
+
+\subsection{Tolérance de non-régression distribué/séquentiel}
+\label{sec:tolerance-derivation}
+
+Le test \code{StreamKMSpec} (section~\ref{sec:tests}) ne compare pas le coût
+distribué au coût séquentiel avec une tolérance choisie arbitrairement : elle
+est \emph{dérivée} de la loi de composition multiplicative des coresets
+(section~\ref{sec:solution}), appliquée au nombre de niveaux de fusion que
+\code{RDD.treeReduce} introduit réellement pour un nombre de partitions et
+une profondeur donnés.
+
+En interne, Spark regroupe les partitions par paquets de taille
+$\mathrm{scale} = \max(2, \lceil \mathrm{numPartitions}^{1/\mathrm{depth}}
+\rceil)$ à chaque palier de \code{treeReduce}. Pour $\mathrm{numPartitions} =
+8$ et $\mathrm{depth} = 2$ (valeurs du test), $\mathrm{scale} =
+\lceil\sqrt{8}\rceil = 3$. Chaque paquet de taille $\mathrm{scale}$ est
+réduit par une chaîne de $\mathrm{scale}-1$ fusions séquentielles
+(\code{BucketManager.merge}), chacune composant à nouveau l'erreur
+($(1+\varepsilon)(1+\delta)-1$, section~\ref{sec:solution}) ; sur
+$\mathrm{depth}$ paliers, cela borne le nombre de compositions dans le pire
+cas à
+\[
+\mathrm{levels} = \mathrm{depth}\cdot(\mathrm{scale}-1) = 2\cdot 2 = 4.
+\]
+En reprenant $\varepsilon = 0{,}10$ par niveau (valeur déjà validée
+empiriquement par \code{CoresetSpec} pour une réduction isolée du coreset
+tree), la tolérance composée sur $\mathrm{levels}=4$ niveaux est
+\[
+(1+\varepsilon)^{\mathrm{levels}} - 1 = 1{,}10^4 - 1 \approx 46{,}4\,\%.
+\]
+Cette valeur, calculée par \code{CoresetErrorModel.treeReduceTolerance} et
+non codée en dur, s'ajuste automatiquement si le nombre de partitions ou la
+profondeur de fusion changent.
+
+\subsection{Ce qu'il reste à mesurer}
+
+Deux volets ne sont pas encore couverts par ce rapport et restent des
+travaux à finaliser avant l'évaluation finale :
+\begin{itemize}
+  \item les résultats de l'expérience 1 (variation de $k$) ci-dessus,
+        à exécuter sur Covertype complet ;
+  \item des benchmarks de micro-performance (JMH ou équivalent) sur les
+        opérations élémentaires (\code{seedPlusPlus}, \code{lloyd},
+        \code{CoresetTree.build}, \code{BucketManager.merge}), et une mesure
+        de scalabilité (temps de traitement en fonction du nombre de cœurs
+        et du nombre de partitions), non encore réalisée.
+\end{itemize}

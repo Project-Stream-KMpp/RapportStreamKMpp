@@ -1,0 +1,122 @@
+\section{Description de la solution adoptée}
+\label{sec:solution}
+
+\subsection{Le problème : clustering k-means sur un flux de données}
+
+Le clustering $k$-means classique (algorithme de Lloyd \cite{lloyd1982})
+partitionne un ensemble fini de points $\mathbf{x} = \{x_1,\dots,x_n\}$ en $k$
+groupes en minimisant la somme des carrés des distances intra-cluster
+(\emph{within-cluster sum of squares}). Cet algorithme suppose un accès
+aléatoire répété à l'intégralité des données : à chaque itération, tous les
+points sont relus pour être réaffectés au centre le plus proche.
+
+Cette hypothèse s'effondre dès que les données arrivent en \textbf{flux}
+(\emph{stream}) : un flux est potentiellement infini, ne tient pas en
+mémoire, et ne peut être relu qu'une seule fois. C'est exactement le problème
+que résout \textbf{StreamKM++} \cite{ackermann2012} : au lieu de faire
+tourner $k$-means directement sur le flux, l'algorithme maintient
+incrémentalement un \emph{résumé pondéré} de taille bornée du flux, le
+\textbf{coreset}, et n'applique $k$-means (via son initialisation
+\emph{k-means++} \cite{arthur2007}) que sur ce résumé, une fois qu'un
+clustering est demandé.
+
+\subsection{Coreset et garantie d'approximation}
+
+Un coreset est un ensemble pondéré $S$, de taille $m \ll n$, tel que pour tout
+ensemble de centres $C$ de taille $k$, le coût pondéré du clustering sur $S$
+approxime le coût réel sur l'ensemble complet $P$ à un facteur
+$(1\pm\varepsilon)$ près :
+\[
+(1-\varepsilon)\,\mathrm{cost}(P,C) \;\le\; \mathrm{cost}_w(S,C) \;\le\;
+(1+\varepsilon)\,\mathrm{cost}(P,C).
+\]
+Deux propriétés de composition des coresets sont centrales dans toute la
+suite de ce rapport (thèse \cite{bitsakis2018}, section 2.3.4) :
+\begin{enumerate}
+  \item l'union de deux $\varepsilon$-coresets d'ensembles disjoints est un
+        $\varepsilon$-coreset de leur union (la précision ne se dégrade pas
+        par simple concaténation) ;
+  \item un $\varepsilon$-coreset construit \emph{à partir} d'un
+        $\delta$-coreset (et non des données brutes) est un
+        $(\varepsilon+\delta+\varepsilon\delta)$-coreset de l'ensemble
+        d'origine : l'erreur se \textbf{compose multiplicativement}
+        lorsqu'on réduit un résumé déjà réduit.
+\end{enumerate}
+La seconde propriété a des conséquences directes sur la conception de notre
+couche de parallélisation (section~\ref{sec:implementation}) : chaque niveau
+de fusion supplémentaire dans notre arbre de réduction Spark ajoute un
+facteur multiplicatif d'erreur, ce que nous quantifions explicitement en
+section~\ref{sec:experiments}.
+
+\subsection{Construction du coreset : le \emph{coreset tree}}
+
+StreamKM++ construit son coreset via une structure appelée
+\textbf{coreset tree} : un arbre binaire construit par clustering divisif
+hiérarchique. La racine contient tout l'ensemble de points ; à chaque étape,
+on choisit une feuille avec une probabilité proportionnelle à son
+\textbf{coût} (la somme pondérée des distances au carré de ses points à son
+représentant), on tire un nouveau point représentant dans cette feuille avec
+une probabilité proportionnelle à sa distance au carré au représentant actuel
+(échantillonnage $D^2$, comme dans le seeding de $k$-means++), puis on scinde
+la feuille en deux selon la proximité aux deux représentants. Le processus
+s'arrête dès que le nombre de feuilles atteint $m$ ; l'union des
+représentants des feuilles, pondérés par la masse de leur sous-ensemble,
+constitue le coreset.
+
+\paragraph{Choix d'implémentation.}
+La descente dans l'arbre (\code{CoresetTree.descend}, voir
+section~\ref{sec:implementation}) est proportionnelle au \emph{coût} de la
+feuille, et non à sa masse : une feuille déjà bien approximée ne doit plus
+être prioritairement scindée, conformément au raisonnement de l'article
+original d'Ackermann et al. \cite{ackermann2012}. Nous distinguons de la
+même façon, dans le nœud de l'arbre, le \og coût\fg{} (qui pilote la
+descente) de la \og masse\fg{} (qui pondère le point de coreset produit en
+sortie) : ce sont deux quantités différentes, toutes deux nécessaires.
+
+\subsection{Traitement du flux : merge-and-reduce}
+
+Le coreset tree ne suffit pas seul à traiter un flux : il faut aussi une
+technique pour consommer les points \emph{au fur et à mesure de leur arrivée},
+sans jamais avoir à les stocker tous. StreamKM++ utilise pour cela la
+technique classique de \textbf{merge-and-reduce}
+\cite{bitsakis2018} : une hiérarchie de \og buckets\fg{} $B_0, B_1, \dots$ où
+$B_0$ est un tampon d'entrée de taille au plus $m$, et chaque $B_i$
+($i\ge 1$) est soit vide, soit contient exactement $m$ points représentant
+$2^{i-1}\cdot m$ points du flux d'origine. Quand $B_0$ se remplit, il est
+fusionné en cascade avec les niveaux supérieurs déjà pleins (en reconstruisant
+à chaque fois un coreset de taille $m$ via le coreset tree), jusqu'à trouver
+un niveau libre. Le nombre de niveaux croît en $O(\log(n/m))$ : la mémoire
+utilisée reste bornée indépendamment de la taille totale $n$ du flux, sans
+qu'il soit nécessaire de connaître $n$ à l'avance.
+
+\subsection{Ce qui change en passant de Flink à Spark}
+
+La thèse \cite{bitsakis2018} implémente ce pipeline en Apache Flink, où
+chaque \emph{subtask} parallèle maintient sa propre hiérarchie de buckets, et
+où la fusion finale des coresets partiels de tous les subtasks
+(\code{FlatMapToFinalCoreset}) est un opérateur \textbf{non-parallèle},
+identifié par la thèse elle-même comme le goulot d'étranglement qui plafonne
+le \emph{speedup} au-delà de 8 cœurs (\cite{bitsakis2018}, section 5.3.1).
+Notre contribution principale (détaillée en section~\ref{sec:implementation})
+est de remplacer cette fusion séquentielle par une réduction \textbf{en
+arbre} (\code{RDD.treeReduce}), qui répartit le travail de fusion sur
+plusieurs niveaux parallèles plutôt que de tout ramener sur un seul nœud.
+
+Trois autres différences de portage sont à noter dès cette section car
+elles conditionnent la lecture des sections suivantes :
+\begin{itemize}
+  \item Spark n'a pas d'équivalent du mécanisme de \emph{watermark} de Flink
+        pour détecter la fin d'un flux borné : le modèle micro-batch de
+        Structured Streaming rend ce problème sans objet (chaque appel à
+        \code{foreachBatch} délimite explicitement un lot).
+  \item Le \emph{partitionnement} et le \emph{parallélisme} (nombre de
+        cœurs) sont deux leviers Spark découplés, alors que dans Flink un
+        seul paramètre (\emph{parallelism}) contrôle les deux à la fois.
+        Cela nous permet une expérience que Flink ne permet pas
+        nativement : faire varier le nombre de partitions à nombre de
+        cœurs constant.
+  \item Flink expose un mécanisme de \emph{Queryable State} permettant
+        d'interroger l'état interne depuis l'extérieur du job ; Spark n'a
+        pas d'équivalent direct pour un état inter-micro-batch. Ce point est
+        repris comme limitation assumée en section~\ref{sec:discussion}.
+\end{itemize}

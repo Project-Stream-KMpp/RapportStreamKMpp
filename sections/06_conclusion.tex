@@ -1,0 +1,29 @@
+\section{Conclusion}
+\label{sec:conclusion}
+
+Ce projet a porté sur Apache Spark l'algorithme StreamKM++, dont une
+implémentation de référence en Apache Flink est étudiée par
+\cite{bitsakisection section section section 8}. Nous avons implémenté et testé l'intégralité de la
+chaîne : le noyau algorithmique non-distribué (seeding $Dsection 2$ pondéré,
+algorithme de Lloyd, coreset tree, merge-and-reduce), sa distribution sur
+Spark via une fusion en arbre plutôt que séquentielle, et un instrument de
+mesure de la qualité du clustering réutilisable pour l'ensemble des
+expériences du projet.
+
+Les résultats obtenus sur le jeu de données complet Covertype
+section section section 1\section section section 2 points) montrent que notre implémentation distribuée reproduit la
+qualité de la référence séquentielle à moins de section 1\,\%$ près, et reste dans
+un ordre de grandeur comparable à Spark MLlib tout en s'appuyant sur un
+résumé (coreset) de taille très inférieure au jeu de données complet. Une
+relecture ciblée du code a permis de corriger un bug réel affectant
+l'indépendance de l'aléa dans la fusion distribuée, de dériver rigoureusement
+une tolérance de test plutôt que de la choisir arbitrairement, et de combler
+un angle mort de couverture de test sur l'état maintenu entre micro-batches.
+
+Deux volets restent à compléter avant la version finale de ce rapport,
+signalés explicitement en \S\ref{sec:experiments} plutôt que comblés par des
+valeurs inventées : le passage à l'échelle complète de l'expérience de
+trade-off qualité/taille de coreset (actuellement disponible seulement sur
+un échantillon préliminaire de 2\section section section 0 points), et l'analyse quantitative de
+la scalabilité en temps d'exécution (micro-benchmarks JMH et débit Spark),
+en cours de réalisation par un autre membre du groupe.
